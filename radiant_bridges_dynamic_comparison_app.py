@@ -5,12 +5,14 @@ from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
 try:
-    from fpdf import FPDF
-    PDF_AVAILABLE = True
+    import pdfplumber
+    PDF_READ_AVAILABLE = True
 except Exception:
-    PDF_AVAILABLE = False
+    PDF_READ_AVAILABLE = False
 
 
 st.set_page_config(
@@ -121,258 +123,227 @@ def ensure_active_selection() -> None:
 
 
 def clean_text(value: Any) -> str:
-    text = str(value).replace("\n", " ").strip()
-    return text.encode("latin-1", "ignore").decode("latin-1")
+    return str(value).replace("\n", " ").strip()
 
 
 def read_uploaded_file(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
+
     if name.endswith(".csv"):
         return pd.read_csv(uploaded_file).fillna("")
-    return pd.read_excel(uploaded_file).fillna("")
+
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded_file).fillna("")
+
+    if name.endswith(".pdf"):
+        if not PDF_READ_AVAILABLE:
+            return pd.DataFrame({"PDF Error": ["pdfplumber not installed. Add pdfplumber to requirements.txt"]})
+
+        rows = []
+        with pdfplumber.open(uploaded_file) as pdf:
+            for page_no, page in enumerate(pdf.pages, start=1):
+                tables = page.extract_tables()
+                for table in tables or []:
+                    for row in table:
+                        rows.append(row)
+
+                text = page.extract_text()
+                if text:
+                    for line in text.split("\n"):
+                        rows.append([f"Page {page_no}", line])
+
+        if not rows:
+            return pd.DataFrame({"PDF Content": ["No extractable text/table found"]})
+
+        max_cols = max(len(r) for r in rows)
+        rows = [r + [""] * (max_cols - len(r)) for r in rows]
+        return pd.DataFrame(rows, columns=[f"Column {i+1}" for i in range(max_cols)]).fillna("")
+
+    raise ValueError("Unsupported file format")
 
 
-def build_formatted_excel(groups, vendors, project_info) -> bytes:
-    output = io.BytesIO()
+def build_excel(groups, vendors, project_info) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Comparison"
 
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        workbook = writer.book
-        ws = workbook.add_worksheet("Comparison")
-        writer.sheets["Comparison"] = ws
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        ws.set_landscape()
-        ws.fit_to_pages(1, 0)
+    title_fill = PatternFill("solid", fgColor="D9EAF7")
+    group_fill = PatternFill("solid", fgColor="BDD7EE")
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    spec_fill = PatternFill("solid", fgColor="E2F0D9")
+    label_fill = PatternFill("solid", fgColor="F2F2F2")
 
-        title_fmt = workbook.add_format({
-            "bold": True, "font_size": 16, "align": "center",
-            "valign": "vcenter", "border": 1, "bg_color": "#D9EAF7"
-        })
-        subtitle_fmt = workbook.add_format({
-            "bold": True, "font_size": 12, "align": "center",
-            "valign": "vcenter", "border": 1, "bg_color": "#EAF4DD"
-        })
-        label_fmt = workbook.add_format({
-            "bold": True, "border": 1, "bg_color": "#F2F2F2"
-        })
-        value_fmt = workbook.add_format({
-            "border": 1, "text_wrap": True
-        })
-        group_fmt = workbook.add_format({
-            "bold": True, "font_size": 12, "align": "center",
-            "border": 1, "bg_color": "#BDD7EE"
-        })
-        header_fmt = workbook.add_format({
-            "bold": True, "align": "center", "border": 1,
-            "bg_color": "#1F4E78", "font_color": "#FFFFFF",
-            "text_wrap": True
-        })
-        spec_fmt = workbook.add_format({
-            "bold": True, "border": 1, "bg_color": "#E2F0D9",
-            "text_wrap": True, "valign": "top"
-        })
-        body_fmt = workbook.add_format({
-            "border": 1, "text_wrap": True, "valign": "top"
-        })
+    columns = ["Specification", "Consultant"] + vendors
+    last_col = len(columns)
+    row = 1
 
-        columns = ["Specification", "Consultant"] + vendors
-        last_col = len(columns) - 1
+    def style_range(r1, c1, r2, c2, fill=None, bold=False, color="000000", align="center"):
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                cell = ws.cell(r, c)
+                cell.border = border
+                cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
+                cell.font = Font(bold=bold, color=color)
+                if fill:
+                    cell.fill = fill
 
-        ws.set_column(0, 0, 30)
-        ws.set_column(1, last_col, 24)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_col)
+    ws.cell(row, 1, project_info.get("document_title", "ELEVATOR TECHNICAL COMPARISON"))
+    style_range(row, 1, row, last_col, title_fill, True)
+    row += 1
 
-        row = 0
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_col)
+    ws.cell(row, 1, project_info.get("project", "RADIANT BRIDGES PROJECT"))
+    style_range(row, 1, row, last_col, title_fill, True)
+    row += 2
 
-        ws.merge_range(
-            row, 0, row, last_col,
-            project_info.get("document_title", "ELEVATOR TECHNICAL COMPARISON"),
-            title_fmt
-        )
+    info_rows = [
+        ("Client", project_info.get("client", ""), "Date", project_info.get("comparison_date", "")),
+        ("Main Contractor", project_info.get("main_contractor", ""), "Revision", project_info.get("revision", "")),
+        ("Material / Work", project_info.get("material_work", ""), "PR No.", project_info.get("pr_no", "")),
+    ]
+
+    mid = max(2, last_col // 2)
+
+    for a, b, c, d in info_rows:
+        ws.cell(row, 1, a)
+        ws.cell(row, 2, b)
+        ws.cell(row, mid + 1, c)
+        ws.cell(row, mid + 2, d)
+        style_range(row, 1, row, last_col, None, False, align="left")
+        ws.cell(row, 1).fill = label_fill
+        ws.cell(row, mid + 1).fill = label_fill
         row += 1
 
-        ws.merge_range(
-            row, 0, row, last_col,
-            project_info.get("project", "RADIANT BRIDGES PROJECT"),
-            subtitle_fmt
-        )
-        row += 2
+    row += 1
 
-        info_rows = [
-            ("Client", project_info.get("client", ""), "Date", project_info.get("comparison_date", "")),
-            ("Main Contractor", project_info.get("main_contractor", ""), "Revision", project_info.get("revision", "")),
-            ("Material / Work", project_info.get("material_work", ""), "PR No.", project_info.get("pr_no", "")),
-        ]
+    for tower, group_data in groups.items():
+        for group, df in group_data.items():
+            df = sync_vendor_columns(df, vendors)
 
-        mid = max(2, last_col // 2)
-
-        for left_label, left_value, right_label, right_value in info_rows:
-            ws.write(row, 0, left_label, label_fmt)
-            ws.merge_range(row, 1, row, mid, left_value, value_fmt)
-            ws.write(row, mid + 1, right_label, label_fmt)
-            ws.merge_range(row, mid + 2, row, last_col, right_value, value_fmt)
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_col)
+            ws.cell(row, 1, f"{tower} - {group}")
+            style_range(row, 1, row, last_col, group_fill, True)
             row += 1
 
-        row += 1
+            for col_idx, col_name in enumerate(columns, start=1):
+                ws.cell(row, col_idx, col_name)
+            style_range(row, 1, row, last_col, header_fill, True, color="FFFFFF")
+            row += 1
 
-        for tower, group_data in groups.items():
-            for group, df in group_data.items():
-                df = sync_vendor_columns(df, vendors)
-
-                ws.merge_range(row, 0, row, last_col, f"{tower} - {group}", group_fmt)
+            for _, data_row in df.iterrows():
+                for col_idx, col_name in enumerate(columns, start=1):
+                    ws.cell(row, col_idx, str(data_row.get(col_name, "")))
+                    ws.cell(row, col_idx).border = border
+                    ws.cell(row, col_idx).alignment = Alignment(wrap_text=True, vertical="top")
+                    if col_idx == 1:
+                        ws.cell(row, col_idx).fill = spec_fill
+                        ws.cell(row, col_idx).font = Font(bold=True)
                 row += 1
 
-                for col_idx, col_name in enumerate(columns):
-                    ws.write(row, col_idx, col_name, header_fmt)
-                row += 1
+            row += 2
 
-                for _, data_row in df.iterrows():
-                    ws.write(row, 0, data_row.get("Specification", ""), spec_fmt)
+    for col in range(1, last_col + 1):
+        ws.column_dimensions[chr(64 + col) if col <= 26 else "Z"].width = 24
+    ws.column_dimensions["A"].width = 32
 
-                    for col_idx, col_name in enumerate(columns[1:], start=1):
-                        ws.write(row, col_idx, str(data_row.get(col_name, "")), body_fmt)
-
-                    row += 1
-
-                row += 2
-
+    output = io.BytesIO()
+    wb.save(output)
     output.seek(0)
     return output.getvalue()
 
 
-def build_pdf_report(groups, vendors, project_info) -> bytes:
-    if not PDF_AVAILABLE:
-        raise RuntimeError("PDF package is not installed. Add fpdf2==2.7.9 to requirements.txt")
-
-    pdf = FPDF(orientation="L", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=10)
-
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, clean_text(project_info.get("document_title", "")), ln=True, align="C")
-
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, clean_text(project_info.get("project", "")), ln=True, align="C")
-    pdf.ln(4)
-
-    pdf.set_font("Arial", "", 9)
-    pdf.cell(45, 7, "Client", border=1)
-    pdf.cell(95, 7, clean_text(project_info.get("client", "")), border=1)
-    pdf.cell(35, 7, "Date", border=1)
-    pdf.cell(95, 7, clean_text(project_info.get("comparison_date", "")), border=1, ln=True)
-
-    pdf.cell(45, 7, "Main Contractor", border=1)
-    pdf.cell(95, 7, clean_text(project_info.get("main_contractor", "")), border=1)
-    pdf.cell(35, 7, "Revision", border=1)
-    pdf.cell(95, 7, clean_text(project_info.get("revision", "")), border=1, ln=True)
-
-    pdf.cell(45, 7, "Material / Work", border=1)
-    pdf.cell(95, 7, clean_text(project_info.get("material_work", "")), border=1)
-    pdf.cell(35, 7, "PR No.", border=1)
-    pdf.cell(95, 7, clean_text(project_info.get("pr_no", "")), border=1, ln=True)
+def build_simple_pdf(groups, vendors, project_info) -> bytes:
+    lines = []
+    lines.append(project_info.get("document_title", "ELEVATOR TECHNICAL COMPARISON"))
+    lines.append(project_info.get("project", "RADIANT BRIDGES PROJECT"))
+    lines.append("")
+    lines.append(f"Client: {project_info.get('client', '')}")
+    lines.append(f"Main Contractor: {project_info.get('main_contractor', '')}")
+    lines.append(f"Material / Work: {project_info.get('material_work', '')}")
+    lines.append(f"Date: {project_info.get('comparison_date', '')}")
+    lines.append("")
 
     for tower, group_data in groups.items():
         for group, df in group_data.items():
             df = sync_vendor_columns(df, vendors)
 
-            pdf.add_page()
-            pdf.set_font("Arial", "B", 12)
-            pdf.cell(
-                0, 8,
-                clean_text(f"CONSULTANT SPECIFICATION - {tower} - {group}"),
-                ln=True,
-                align="C",
-            )
-            pdf.ln(2)
+            lines.append("=" * 90)
+            lines.append(f"CONSULTANT SPECIFICATION - {tower} - {group}")
+            lines.append("=" * 90)
 
-            pdf.set_font("Arial", "B", 8)
-            pdf.cell(70, 7, "Specification", border=1, align="C")
-            pdf.cell(200, 7, "Consultant Specification", border=1, align="C")
-            pdf.ln()
+            for _, r in df.iterrows():
+                lines.append(f"{r.get('Specification', '')}: {r.get('Consultant', '')}")
 
-            pdf.set_font("Arial", "", 7)
+            lines.append("")
 
-            for _, row in df.iterrows():
-                if pdf.get_y() > 185:
-                    pdf.add_page()
+            for vendor in vendors:
+                lines.append("-" * 90)
+                lines.append(f"VENDOR OFFER - {vendor} - {tower} - {group}")
+                lines.append("-" * 90)
 
-                y = pdf.get_y()
-                pdf.multi_cell(70, 5, clean_text(row.get("Specification", ""))[:60], border=1)
-                pdf.set_xy(80, y)
-                pdf.multi_cell(200, 5, clean_text(row.get("Consultant", ""))[:160], border=1)
-                pdf.set_y(max(pdf.get_y(), y + 8))
+                for _, r in df.iterrows():
+                    lines.append(f"{r.get('Specification', '')}: {r.get(vendor, '')}")
 
-    for vendor in vendors:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 12)
-        pdf.cell(0, 8, clean_text(f"VENDOR OFFER - {vendor}"), ln=True, align="C")
-        pdf.ln(2)
+                lines.append("")
 
-        for tower, group_data in groups.items():
-            for group, df in group_data.items():
-                df = sync_vendor_columns(df, vendors)
+    return make_pdf_from_lines(lines)
 
-                pdf.set_font("Arial", "B", 10)
-                pdf.cell(0, 7, clean_text(f"{tower} - {group}"), ln=True)
 
-                pdf.set_font("Arial", "B", 8)
-                pdf.cell(70, 7, "Specification", border=1, align="C")
-                pdf.cell(200, 7, clean_text(vendor), border=1, align="C")
-                pdf.ln()
+def make_pdf_from_lines(lines: List[str]) -> bytes:
+    def esc(s: str) -> str:
+        s = str(s).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return s[:120]
 
-                pdf.set_font("Arial", "", 7)
+    pages = []
+    chunk_size = 42
+    for i in range(0, len(lines), chunk_size):
+        pages.append(lines[i:i + chunk_size])
 
-                for _, row in df.iterrows():
-                    if pdf.get_y() > 185:
-                        pdf.add_page()
+    objects = []
+    objects.append("<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(f"<< /Type /Pages /Kids [{' '.join(f'{3 + i*2} 0 R' for i in range(len(pages)))}] /Count {len(pages)} >>")
 
-                    y = pdf.get_y()
-                    pdf.multi_cell(70, 5, clean_text(row.get("Specification", ""))[:60], border=1)
-                    pdf.set_xy(80, y)
-                    pdf.multi_cell(200, 5, clean_text(row.get(vendor, ""))[:160], border=1)
-                    pdf.set_y(max(pdf.get_y(), y + 8))
+    for page_index, page_lines in enumerate(pages):
+        page_obj = 3 + page_index * 2
+        content_obj = page_obj + 1
 
-                pdf.ln(3)
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] "
+            f"/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> "
+            f"/Contents {content_obj} 0 R >>"
+        )
 
-    for tower, group_data in groups.items():
-        for group, df in group_data.items():
-            df = sync_vendor_columns(df, vendors)
-            columns = ["Specification", "Consultant"] + vendors
+        y = 560
+        content = ["BT /F1 9 Tf"]
+        for line in page_lines:
+            content.append(f"40 {y} Td ({esc(line)}) Tj")
+            content.append("0 -12 Td")
+            y -= 12
+        content.append("ET")
+        stream = "\n".join(content)
+        objects.append(f"<< /Length {len(stream.encode('latin-1', 'ignore'))} >>\nstream\n{stream}\nendstream")
 
-            pdf.add_page()
-            pdf.set_font("Arial", "B", 12)
-            pdf.cell(
-                0, 8,
-                clean_text(f"FULL COMPARISON - {tower} - {group}"),
-                ln=True,
-                align="C",
-            )
-            pdf.ln(2)
+    pdf = "%PDF-1.4\n"
+    offsets = [0]
 
-            usable_width = 277
-            spec_width = 45
-            other_width = (usable_width - spec_width) / max(1, len(columns) - 1)
-            widths = [spec_width] + [other_width] * (len(columns) - 1)
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf.encode("latin-1")))
+        pdf += f"{i} 0 obj\n{obj}\nendobj\n"
 
-            pdf.set_font("Arial", "B", 7)
-            for i, col in enumerate(columns):
-                pdf.cell(widths[i], 7, clean_text(col)[:22], border=1, align="C")
-            pdf.ln()
+    xref_pos = len(pdf.encode("latin-1"))
+    pdf += f"xref\n0 {len(objects) + 1}\n"
+    pdf += "0000000000 65535 f \n"
 
-            pdf.set_font("Arial", "", 6.5)
+    for off in offsets[1:]:
+        pdf += f"{off:010d} 00000 n \n"
 
-            for _, row in df.iterrows():
-                if pdf.get_y() > 185:
-                    pdf.add_page()
+    pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF"
 
-                y = pdf.get_y()
-                x = pdf.get_x()
-
-                for i, col in enumerate(columns):
-                    pdf.set_xy(x + sum(widths[:i]), y)
-                    pdf.multi_cell(widths[i], 4, clean_text(row.get(col, ""))[:45], border=1)
-
-                pdf.set_y(y + 8)
-
-    return pdf.output(dest="S").encode("latin-1")
+    return pdf.encode("latin-1", "ignore")
 
 
 def export_backup() -> bytes:
@@ -396,7 +367,6 @@ ensure_active_selection()
 
 with st.sidebar:
     st.header("⚙️ Project Info")
-
     pi = st.session_state.project_info
 
     pi["project"] = st.text_input("Project", pi.get("project", ""))
@@ -413,68 +383,48 @@ with st.sidebar:
 
     if st.session_state.groups:
         tower_list = list(st.session_state.groups.keys())
-        st.session_state.active_tower = st.selectbox(
-            "Tower / Section",
-            tower_list,
-            index=tower_list.index(st.session_state.active_tower)
-            if st.session_state.active_tower in tower_list else 0,
-        )
+        st.session_state.active_tower = st.selectbox("Tower / Section", tower_list)
 
         group_list = list(st.session_state.groups[st.session_state.active_tower].keys())
-
         if group_list:
-            st.session_state.active_group = st.selectbox(
-                "Group",
-                group_list,
-                index=group_list.index(st.session_state.active_group)
-                if st.session_state.active_group in group_list else 0,
-            )
+            st.session_state.active_group = st.selectbox("Group", group_list)
         else:
             st.session_state.active_group = ""
-            st.info("No group under this tower. Add a group.")
 
     new_tower = st.text_input("Add Tower / Section")
-    if st.button("Add Tower / Section", use_container_width=True):
+    if st.button("Add Tower / Section"):
         name = new_tower.strip()
         if name and name not in st.session_state.groups:
             st.session_state.groups[name] = {}
             st.session_state.active_tower = name
-            st.session_state.active_group = ""
             st.rerun()
 
     new_group = st.text_input("Add Group")
-    if st.button("Add Group", use_container_width=True):
+    if st.button("Add Group"):
         name = new_group.strip()
-        if not st.session_state.active_tower:
-            st.warning("Add or select a tower first.")
-        elif name and name not in st.session_state.groups[st.session_state.active_tower]:
-            st.session_state.groups[st.session_state.active_tower][name] = make_default_df(
-                st.session_state.vendors
-            )
+        if st.session_state.active_tower and name:
+            st.session_state.groups[st.session_state.active_tower][name] = make_default_df(st.session_state.vendors)
             st.session_state.active_group = name
             st.rerun()
 
     c1, c2 = st.columns(2)
+    if c1.button("Remove Group"):
+        if st.session_state.active_tower and st.session_state.active_group:
+            del st.session_state.groups[st.session_state.active_tower][st.session_state.active_group]
+            ensure_active_selection()
+            st.rerun()
 
-    with c1:
-        if st.button("Remove Group", use_container_width=True):
-            if st.session_state.active_tower and st.session_state.active_group:
-                del st.session_state.groups[st.session_state.active_tower][st.session_state.active_group]
-                ensure_active_selection()
-                st.rerun()
-
-    with c2:
-        if st.button("Remove Tower", use_container_width=True):
-            if st.session_state.active_tower:
-                del st.session_state.groups[st.session_state.active_tower]
-                ensure_active_selection()
-                st.rerun()
+    if c2.button("Remove Tower"):
+        if st.session_state.active_tower:
+            del st.session_state.groups[st.session_state.active_tower]
+            ensure_active_selection()
+            st.rerun()
 
     st.divider()
     st.header("🏷️ Vendors")
 
     new_vendor = st.text_input("Add Vendor")
-    if st.button("Add Vendor", use_container_width=True):
+    if st.button("Add Vendor"):
         name = new_vendor.strip().upper()
         if name and name not in st.session_state.vendors:
             st.session_state.vendors.append(name)
@@ -484,17 +434,14 @@ with st.sidebar:
     for vendor in list(st.session_state.vendors):
         a, b = st.columns([4, 1])
         a.write(vendor)
-        if b.button("❌", key=f"delete_vendor_{vendor}"):
+        if b.button("❌", key=f"del_{vendor}"):
             st.session_state.vendors.remove(vendor)
             sync_all_groups()
             st.rerun()
 
 
 st.title("🛗 Radiant Bridges Dynamic Comparison App")
-st.caption("Consultant specification, vendor offer comparison, Excel/PDF export, and attachment management.")
-
-if not PDF_AVAILABLE:
-    st.warning("PDF export package is missing. Add `fpdf2==2.7.9` to requirements.txt and reboot the app.")
+st.caption("No fpdf or xlsxwriter required. Excel uses openpyxl. PDF uses built-in simple PDF generator.")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Towers", len(st.session_state.groups))
@@ -536,10 +483,10 @@ st.session_state.groups[active_tower][active_group] = sync_vendor_columns(
 )
 
 st.divider()
-st.subheader("📎 Attachments")
+st.subheader("📎 Attachments + Mapping")
 
 attachment_uploads = st.file_uploader(
-    "Upload attachments",
+    "Upload attachments / vendor offers / consultant specs",
     type=["pdf", "xlsx", "xls", "csv", "docx", "png", "jpg", "jpeg"],
     accept_multiple_files=True,
 )
@@ -560,80 +507,70 @@ if st.session_state.attachments:
         a, b, c = st.columns([5, 2, 1])
         a.write(f"📄 {item['name']}")
         b.write(f"{round(item['size'] / 1024, 1)} KB")
-        if c.button("Remove", key=f"remove_attachment_{i}"):
+        if c.button("Remove", key=f"remove_{i}"):
             st.session_state.attachments.pop(i)
             st.rerun()
 
-    if st.button("Remove All Attachments"):
-        st.session_state.attachments = []
-        st.rerun()
+    selected_name = st.selectbox(
+        "Select attachment for mapping",
+        [x["name"] for x in st.session_state.attachments],
+    )
+
+    selected = next(x for x in st.session_state.attachments if x["name"] == selected_name)
+    file_obj = io.BytesIO(selected["bytes"])
+    file_obj.name = selected["name"]
+
+    if selected_name.lower().endswith((".xlsx", ".xls", ".csv", ".pdf")):
+        try:
+            raw_df = read_uploaded_file(file_obj)
+            st.dataframe(raw_df.head(20), use_container_width=True, hide_index=True)
+
+            target_cols = ["Consultant"] + st.session_state.vendors
+            options = ["-- Do not import --"] + list(raw_df.columns)
+
+            mapping = {}
+            cols = st.columns(min(3, len(target_cols)))
+
+            for i, target in enumerate(target_cols):
+                with cols[i % len(cols)]:
+                    mapping[target] = st.selectbox(
+                        f"Map to {target}",
+                        options,
+                        key=f"map_{selected_name}_{target}",
+                    )
+
+            if st.button("Apply Mapping", type="primary"):
+                df = st.session_state.groups[active_tower][active_group].copy()
+                max_rows = min(len(df), len(raw_df))
+
+                for target, source in mapping.items():
+                    if source != "-- Do not import --":
+                        df.loc[:max_rows - 1, target] = raw_df[source].astype(str).head(max_rows).tolist()
+
+                st.session_state.groups[active_tower][active_group] = sync_vendor_columns(
+                    df,
+                    st.session_state.vendors,
+                )
+                st.success("Mapping applied.")
+                st.rerun()
+
+        except Exception as exc:
+            st.error(f"Unable to map file: {exc}")
+    else:
+        st.info("This file is stored as attachment only. Mapping supports Excel, CSV, and PDF.")
 else:
     st.info("No attachments uploaded.")
 
 st.divider()
-st.subheader("📂 Smart Import to Current Group")
-
-uploaded_file = st.file_uploader(
-    "Upload Excel/CSV file to import values",
-    type=["xlsx", "xls", "csv"],
-    key="smart_import",
-)
-
-if uploaded_file:
-    try:
-        raw_df = read_uploaded_file(uploaded_file)
-        st.dataframe(raw_df.head(10), use_container_width=True, hide_index=True)
-
-        target_cols = ["Consultant"] + st.session_state.vendors
-        options = ["-- Do not import --"] + list(raw_df.columns)
-
-        mapping = {}
-        cols = st.columns(min(3, len(target_cols)))
-
-        for i, target in enumerate(target_cols):
-            with cols[i % len(cols)]:
-                mapping[target] = st.selectbox(
-                    f"Map to {target}",
-                    options,
-                    key=f"map_{target}",
-                )
-
-        if st.button("Apply Mapping", type="primary"):
-            df = st.session_state.groups[active_tower][active_group].copy()
-            max_rows = min(len(df), len(raw_df))
-
-            for target, source in mapping.items():
-                if source != "-- Do not import --":
-                    df.loc[:max_rows - 1, target] = raw_df[source].astype(str).head(max_rows).tolist()
-
-            st.session_state.groups[active_tower][active_group] = sync_vendor_columns(
-                df,
-                st.session_state.vendors,
-            )
-            st.success("Import applied.")
-            st.rerun()
-
-    except Exception as exc:
-        st.error(f"Unable to read file: {exc}")
-
-st.divider()
-st.subheader("📑 Full Preview")
-
-with st.expander("Show all towers and groups"):
-    for tower, group_data in st.session_state.groups.items():
-        st.markdown(f"### {tower}")
-        for group, df in group_data.items():
-            st.markdown(f"**{group}**")
-            st.dataframe(
-                sync_vendor_columns(df, st.session_state.vendors),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-st.divider()
 st.subheader("📤 Export")
 
-excel_bytes = build_formatted_excel(
+excel_bytes = build_excel(
+    st.session_state.groups,
+    st.session_state.vendors,
+    st.session_state.project_info,
+)
+
+pdf_bytes = build_simple_pdf(
     st.session_state.groups,
     st.session_state.vendors,
     st.session_state.project_info,
@@ -652,22 +589,13 @@ with x1:
     )
 
 with x2:
-    if PDF_AVAILABLE:
-        pdf_bytes = build_pdf_report(
-            st.session_state.groups,
-            st.session_state.vendors,
-            st.session_state.project_info,
-        )
-
-        st.download_button(
-            "📄 Download PDF",
-            data=pdf_bytes,
-            file_name="RADIANT_BRIDGES_COMPARISON.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-    else:
-        st.button("📄 Download PDF", disabled=True, use_container_width=True)
+    st.download_button(
+        "📄 Download PDF",
+        data=pdf_bytes,
+        file_name="RADIANT_BRIDGES_COMPARISON.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
 
 with x3:
     st.download_button(
@@ -680,7 +608,7 @@ with x3:
 
 with st.expander("Install / Run"):
     st.code(
-        """pip install streamlit pandas openpyxl xlsxwriter fpdf2==2.7.9
+        """pip install streamlit pandas openpyxl pdfplumber
 streamlit run radiant_bridges_dynamic_comparison_app.py""",
         language="bash",
     )
