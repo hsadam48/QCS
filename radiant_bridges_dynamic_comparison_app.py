@@ -59,6 +59,38 @@ SPEC_LIST = [
     "Made",
 ]
 
+SPEC_KEYWORDS = {
+    "CAPACITY": ["capacity", "kg", "persons", "passenger"],
+    "SPEED": ["speed", "m/s", "rated speed"],
+    "DOOR TYPE": ["door type", "opening type", "center opening", "telescopic"],
+    "DOOR SIZE (W X H)": ["door size", "door opening", "opening size"],
+    "SHAFT SIZE (W X D)": ["shaft size", "hoistway", "well size"],
+    "CABIN SIZE (W X D X H)": ["cabin size", "car size", "car internal"],
+    "OVER HEAD HEIGHT": ["overhead", "over head", "oh"],
+    "PIT DEPTH": ["pit depth", "pit"],
+    "NO. OF LIFTS": ["no. of lifts", "number of lifts", "quantity"],
+    "Lift code": ["lift code", "elevator code"],
+    "Machine location": ["machine location", "machine room"],
+    "Operation": ["operation", "control system"],
+    "No. of Stops": ["stops", "landings"],
+    "Travel Height": ["travel height", "travel"],
+    "Car wall": ["car wall", "cabin wall"],
+    "Front Wall": ["front wall"],
+    "Ceiling": ["ceiling"],
+    "Mirror": ["mirror"],
+    "Hand rail": ["handrail", "hand rail"],
+    "Skirting": ["skirting"],
+    "Decoration": ["decoration", "finish"],
+    "Door Material": ["door material", "landing door"],
+    "Sill Material": ["sill material", "sill"],
+    "COP Panel": ["cop", "car operating panel"],
+    "LOP": ["lop", "landing operating panel"],
+    "Landing Jamb In Ground Floor": ["ground floor jamb", "main floor jamb"],
+    "Landing Jamb In Other Floors": ["other floor jamb", "typical floor jamb"],
+    "Hall Indicator": ["hall indicator", "indicator"],
+    "Made": ["made", "country of origin", "manufacturer"],
+}
+
 
 def make_default_df(vendors: List[str]) -> pd.DataFrame:
     df = pd.DataFrame(
@@ -108,7 +140,13 @@ def normalize(value):
         .replace("/", "")
         .replace(":", "")
         .replace(".", "")
+        .replace("(", "")
+        .replace(")", "")
     )
+
+
+def clean_line(text):
+    return str(text).replace("\n", " ").replace("  ", " ").strip()
 
 
 def sync_vendor_columns():
@@ -160,13 +198,16 @@ def read_pdf_lines(uploaded_file):
 
             for table in tables or []:
                 for row in table:
-                    cleaned = [str(x).strip() for x in row if x]
-                    if cleaned:
-                        lines.append(" | ".join(cleaned))
+                    row_text = " | ".join([clean_line(x) for x in row if x])
+                    if row_text:
+                        lines.append(row_text)
 
             text = page.extract_text()
             if text:
-                lines.extend([x.strip() for x in text.split("\n") if x.strip()])
+                for line in text.split("\n"):
+                    line = clean_line(line)
+                    if line:
+                        lines.append(line)
 
     return lines
 
@@ -188,15 +229,30 @@ def read_file_lines(uploaded_file):
     return []
 
 
-def extract_value_by_spec(full_text: str, spec: str):
-    spec_key = normalize(spec)
+def find_value_for_spec(lines, spec):
+    keywords = SPEC_KEYWORDS.get(spec, [spec])
+    keywords = [normalize(k) for k in keywords]
 
-    for line in full_text.splitlines():
-        if spec_key and spec_key in normalize(line):
-            for sep in [":", "-", "–", "|"]:
+    for line in lines:
+        line_clean = normalize(line)
+
+        if any(k in line_clean for k in keywords):
+            if "|" in line:
+                parts = [p.strip() for p in line.split("|") if p.strip()]
+
+                for idx, part in enumerate(parts):
+                    part_clean = normalize(part)
+
+                    if any(k in part_clean for k in keywords):
+                        if idx + 1 < len(parts):
+                            return parts[idx + 1]
+
+                return parts[-1] if parts else ""
+
+            for sep in [":", "-", "–"]:
                 if sep in line:
                     parts = line.split(sep, 1)
-                    if len(parts) == 2 and parts[1].strip():
+                    if len(parts) == 2:
                         return parts[1].strip()
 
             return line.strip()
@@ -206,7 +262,6 @@ def extract_value_by_spec(full_text: str, spec: str):
 
 def auto_fill_exact(rows, target_col, table_index):
     df = st.session_state.tables[table_index]["df"].copy()
-    full_text = "\n".join(rows)
     filled = 0
 
     for idx, row in df.iterrows():
@@ -215,7 +270,7 @@ def auto_fill_exact(rows, target_col, table_index):
         if not spec:
             continue
 
-        value = extract_value_by_spec(full_text, spec)
+        value = find_value_for_spec(rows, spec)
 
         if value:
             df.at[idx, target_col] = value
@@ -279,6 +334,7 @@ def build_excel():
             vertical="center",
             wrap_text=True,
         )
+
         if fill:
             cell.fill = fill
 
@@ -315,6 +371,7 @@ def build_excel():
 
                 if col_name in st.session_state.vendors and consultant:
                     vendor_value = str(r.get(col_name, "")).strip()
+
                     if vendor_value and normalize(vendor_value) != normalize(consultant):
                         fill = deviation_fill
 
@@ -349,6 +406,7 @@ def build_excel():
         for _, r in df.iterrows():
             for col_idx, col_name in enumerate(df.columns, 1):
                 style(ws.cell(row_no, col_idx, str(r.get(col_name, ""))))
+
             row_no += 1
 
         row_no += 2
@@ -377,6 +435,7 @@ with st.sidebar:
 
     if st.button("Update Vendors"):
         vendors = [x.strip().upper() for x in vendor_text.splitlines() if x.strip()]
+
         if vendors:
             st.session_state.vendors = vendors
             sync_vendor_columns()
@@ -388,12 +447,14 @@ st.subheader("Comparison Tables")
 
 if st.button("➕ Add Tower / Comparison Table", type="primary"):
     new_index = len(st.session_state.tables) + 1
+
     st.session_state.tables.append(
         {
             "name": f"Tower {new_index}",
             "df": make_default_df(st.session_state.vendors),
         }
     )
+
     st.session_state.editor_version += 1
     st.rerun()
 
@@ -455,6 +516,11 @@ if uploaded_files:
                 continue
 
             rows = read_file_lines(uploaded_file)
+
+            if uploaded_file.name.lower().endswith(".pdf") and not PDF_AVAILABLE:
+                st.warning("pdfplumber is not installed. PDF cannot be extracted.")
+                continue
+
             filled = auto_fill_exact(rows, target_col, target_table_index)
 
             if filled:
