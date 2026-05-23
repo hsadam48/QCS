@@ -1,14 +1,20 @@
 import io
 import json
 from datetime import date
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
-from fpdf import FPDF
+
+try:
+    from fpdf import FPDF
+    PDF_AVAILABLE = True
+except Exception:
+    PDF_AVAILABLE = False
+
 
 st.set_page_config(
-    page_title="Radiant Bridges - Dynamic Comparison App",
+    page_title="Radiant Bridges Dynamic Comparison App",
     page_icon="🛗",
     layout="wide",
 )
@@ -21,7 +27,7 @@ SPEC_LIST = [
     "Travel Height", "Car wall", "Front Wall", "Ceiling", "Mirror",
     "Hand rail", "Skirting", "Decoration", "Door Material",
     "Sill Material", "COP Panel", "LOP",
-    "Landing Jamp In Ground Floor", "Landing Jamp In Other Floors",
+    "Landing Jamb In Ground Floor", "Landing Jamb In Other Floors",
     "Hall Indicator", "Made", "Remarks"
 ]
 
@@ -50,7 +56,7 @@ def sync_vendor_columns(df: pd.DataFrame, vendors: List[str]) -> pd.DataFrame:
     required_cols = ["Specification", "Consultant"] + vendors
 
     if "Specification" not in df.columns:
-        df.insert(0, "Specification", SPEC_LIST[:len(df)])
+        df.insert(0, "Specification", "")
 
     if "Consultant" not in df.columns:
         df.insert(1, "Consultant", "")
@@ -62,7 +68,7 @@ def sync_vendor_columns(df: pd.DataFrame, vendors: List[str]) -> pd.DataFrame:
     return df[required_cols].fillna("").copy()
 
 
-def init_state():
+def init_state() -> None:
     if "vendors" not in st.session_state:
         st.session_state.vendors = DEFAULT_VENDORS.copy()
 
@@ -86,16 +92,16 @@ def init_state():
         st.session_state.attachments = []
 
 
-def sync_all_groups():
+def sync_all_groups() -> None:
     for tower in st.session_state.groups:
         for group in st.session_state.groups[tower]:
             st.session_state.groups[tower][group] = sync_vendor_columns(
                 st.session_state.groups[tower][group],
-                st.session_state.vendors
+                st.session_state.vendors,
             )
 
 
-def ensure_active_selection():
+def ensure_active_selection() -> None:
     if not st.session_state.groups:
         st.session_state.active_tower = ""
         st.session_state.active_group = ""
@@ -114,18 +120,16 @@ def ensure_active_selection():
         )[0]
 
 
-def read_uploaded_file(uploaded_file) -> pd.DataFrame:
-    name = uploaded_file.name.lower()
-
-    if name.endswith(".csv"):
-        return pd.read_csv(uploaded_file).fillna("")
-
-    return pd.read_excel(uploaded_file).fillna("")
-
-
 def clean_text(value: Any) -> str:
     text = str(value).replace("\n", " ").strip()
     return text.encode("latin-1", "ignore").decode("latin-1")
+
+
+def read_uploaded_file(uploaded_file) -> pd.DataFrame:
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(uploaded_file).fillna("")
+    return pd.read_excel(uploaded_file).fillna("")
 
 
 def build_formatted_excel(groups, vendors, project_info) -> bytes:
@@ -133,11 +137,11 @@ def build_formatted_excel(groups, vendors, project_info) -> bytes:
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         workbook = writer.book
-        worksheet = workbook.add_worksheet("Comparison")
-        writer.sheets["Comparison"] = worksheet
+        ws = workbook.add_worksheet("Comparison")
+        writer.sheets["Comparison"] = ws
 
-        worksheet.set_landscape()
-        worksheet.fit_to_pages(1, 0)
+        ws.set_landscape()
+        ws.fit_to_pages(1, 0)
 
         title_fmt = workbook.add_format({
             "bold": True, "font_size": 16, "align": "center",
@@ -173,20 +177,21 @@ def build_formatted_excel(groups, vendors, project_info) -> bytes:
         columns = ["Specification", "Consultant"] + vendors
         last_col = len(columns) - 1
 
-        worksheet.set_column(0, 0, 30)
-        worksheet.set_column(1, last_col, 24)
+        ws.set_column(0, 0, 30)
+        ws.set_column(1, last_col, 24)
 
         row = 0
-        worksheet.merge_range(
+
+        ws.merge_range(
             row, 0, row, last_col,
-            project_info.get("document_title", ""),
+            project_info.get("document_title", "ELEVATOR TECHNICAL COMPARISON"),
             title_fmt
         )
         row += 1
 
-        worksheet.merge_range(
+        ws.merge_range(
             row, 0, row, last_col,
-            project_info.get("project", ""),
+            project_info.get("project", "RADIANT BRIDGES PROJECT"),
             subtitle_fmt
         )
         row += 2
@@ -199,11 +204,11 @@ def build_formatted_excel(groups, vendors, project_info) -> bytes:
 
         mid = max(2, last_col // 2)
 
-        for a, b, c, d in info_rows:
-            worksheet.write(row, 0, a, label_fmt)
-            worksheet.merge_range(row, 1, row, mid, b, value_fmt)
-            worksheet.write(row, mid + 1, c, label_fmt)
-            worksheet.merge_range(row, mid + 2, row, last_col, d, value_fmt)
+        for left_label, left_value, right_label, right_value in info_rows:
+            ws.write(row, 0, left_label, label_fmt)
+            ws.merge_range(row, 1, row, mid, left_value, value_fmt)
+            ws.write(row, mid + 1, right_label, label_fmt)
+            ws.merge_range(row, mid + 2, row, last_col, right_value, value_fmt)
             row += 1
 
         row += 1
@@ -212,18 +217,18 @@ def build_formatted_excel(groups, vendors, project_info) -> bytes:
             for group, df in group_data.items():
                 df = sync_vendor_columns(df, vendors)
 
-                worksheet.merge_range(row, 0, row, last_col, f"{tower} - {group}", group_fmt)
+                ws.merge_range(row, 0, row, last_col, f"{tower} - {group}", group_fmt)
                 row += 1
 
                 for col_idx, col_name in enumerate(columns):
-                    worksheet.write(row, col_idx, col_name, header_fmt)
+                    ws.write(row, col_idx, col_name, header_fmt)
                 row += 1
 
                 for _, data_row in df.iterrows():
-                    worksheet.write(row, 0, data_row.get("Specification", ""), spec_fmt)
+                    ws.write(row, 0, data_row.get("Specification", ""), spec_fmt)
 
                     for col_idx, col_name in enumerate(columns[1:], start=1):
-                        worksheet.write(row, col_idx, str(data_row.get(col_name, "")), body_fmt)
+                        ws.write(row, col_idx, str(data_row.get(col_name, "")), body_fmt)
 
                     row += 1
 
@@ -234,6 +239,9 @@ def build_formatted_excel(groups, vendors, project_info) -> bytes:
 
 
 def build_pdf_report(groups, vendors, project_info) -> bytes:
+    if not PDF_AVAILABLE:
+        raise RuntimeError("PDF package is not installed. Add fpdf2==2.7.9 to requirements.txt")
+
     pdf = FPDF(orientation="L", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=10)
 
@@ -261,14 +269,18 @@ def build_pdf_report(groups, vendors, project_info) -> bytes:
     pdf.cell(35, 7, "PR No.", border=1)
     pdf.cell(95, 7, clean_text(project_info.get("pr_no", "")), border=1, ln=True)
 
-    # Consultant Specification Section
     for tower, group_data in groups.items():
         for group, df in group_data.items():
             df = sync_vendor_columns(df, vendors)
 
             pdf.add_page()
             pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, clean_text(f"CONSULTANT SPECIFICATION - {tower} - {group}"), ln=True, align="C")
+            pdf.cell(
+                0, 8,
+                clean_text(f"CONSULTANT SPECIFICATION - {tower} - {group}"),
+                ln=True,
+                align="C",
+            )
             pdf.ln(2)
 
             pdf.set_font("Arial", "B", 8)
@@ -288,7 +300,6 @@ def build_pdf_report(groups, vendors, project_info) -> bytes:
                 pdf.multi_cell(200, 5, clean_text(row.get("Consultant", ""))[:160], border=1)
                 pdf.set_y(max(pdf.get_y(), y + 8))
 
-    # Vendor Offer Section
     for vendor in vendors:
         pdf.add_page()
         pdf.set_font("Arial", "B", 12)
@@ -321,7 +332,6 @@ def build_pdf_report(groups, vendors, project_info) -> bytes:
 
                 pdf.ln(3)
 
-    # Full Comparison Section
     for tower, group_data in groups.items():
         for group, df in group_data.items():
             df = sync_vendor_columns(df, vendors)
@@ -329,7 +339,12 @@ def build_pdf_report(groups, vendors, project_info) -> bytes:
 
             pdf.add_page()
             pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, clean_text(f"FULL COMPARISON - {tower} - {group}"), ln=True, align="C")
+            pdf.cell(
+                0, 8,
+                clean_text(f"FULL COMPARISON - {tower} - {group}"),
+                ln=True,
+                align="C",
+            )
             pdf.ln(2)
 
             usable_width = 277
@@ -343,6 +358,7 @@ def build_pdf_report(groups, vendors, project_info) -> bytes:
             pdf.ln()
 
             pdf.set_font("Arial", "", 6.5)
+
             for _, row in df.iterrows():
                 if pdf.get_y() > 185:
                     pdf.add_page()
@@ -415,6 +431,7 @@ with st.sidebar:
             )
         else:
             st.session_state.active_group = ""
+            st.info("No group under this tower. Add a group.")
 
     new_tower = st.text_input("Add Tower / Section")
     if st.button("Add Tower / Section", use_container_width=True):
@@ -475,6 +492,9 @@ with st.sidebar:
 
 st.title("🛗 Radiant Bridges Dynamic Comparison App")
 st.caption("Consultant specification, vendor offer comparison, Excel/PDF export, and attachment management.")
+
+if not PDF_AVAILABLE:
+    st.warning("PDF export package is missing. Add `fpdf2==2.7.9` to requirements.txt and reboot the app.")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Towers", len(st.session_state.groups))
@@ -619,12 +639,6 @@ excel_bytes = build_formatted_excel(
     st.session_state.project_info,
 )
 
-pdf_bytes = build_pdf_report(
-    st.session_state.groups,
-    st.session_state.vendors,
-    st.session_state.project_info,
-)
-
 x1, x2, x3 = st.columns(3)
 
 with x1:
@@ -638,13 +652,22 @@ with x1:
     )
 
 with x2:
-    st.download_button(
-        "📄 Download PDF",
-        data=pdf_bytes,
-        file_name="RADIANT_BRIDGES_COMPARISON.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
+    if PDF_AVAILABLE:
+        pdf_bytes = build_pdf_report(
+            st.session_state.groups,
+            st.session_state.vendors,
+            st.session_state.project_info,
+        )
+
+        st.download_button(
+            "📄 Download PDF",
+            data=pdf_bytes,
+            file_name="RADIANT_BRIDGES_COMPARISON.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    else:
+        st.button("📄 Download PDF", disabled=True, use_container_width=True)
 
 with x3:
     st.download_button(
@@ -657,7 +680,7 @@ with x3:
 
 with st.expander("Install / Run"):
     st.code(
-        """pip install streamlit pandas openpyxl xlsxwriter fpdf
+        """pip install streamlit pandas openpyxl xlsxwriter fpdf2==2.7.9
 streamlit run radiant_bridges_dynamic_comparison_app.py""",
         language="bash",
     )
