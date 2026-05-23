@@ -3,26 +3,43 @@ from typing import List
 
 import pandas as pd
 import streamlit as st
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Radiant Bridges Pro", page_icon="🛗", layout="wide")
+st.set_page_config(
+    page_title="Radiant Bridges Pro",
+    page_icon="🛗",
+    layout="wide"
+)
 
 DEFAULT_VENDORS = ["KONE", "TKE", "EEE", "AG MELCO"]
 
 SPEC_LIST = [
-    "CAPACITY", "SPEED", "DOOR TYPE", "DOOR SIZE (W X H)",
-    "SHAFT SIZE (W X D)", "CABIN SIZE (W X D X H)",
-    "OVER HEAD HEIGHT", "PIT DEPTH", "NO. OF LIFTS"
+    "CAPACITY",
+    "SPEED",
+    "DOOR TYPE",
+    "DOOR SIZE (W X H)",
+    "SHAFT SIZE (W X D)",
+    "CABIN SIZE (W X D X H)",
+    "OVER HEAD HEIGHT",
+    "PIT DEPTH",
+    "NO. OF LIFTS",
 ]
+
 
 # --- INITIALIZATION ---
 def make_default_df(vendors: List[str]) -> pd.DataFrame:
     df = pd.DataFrame(
         "",
         index=range(len(SPEC_LIST)),
-        columns=["Specification", "Consultant"] + vendors
+        columns=["Specification", "Consultant"] + vendors,
     )
     df["Specification"] = SPEC_LIST
     return df
@@ -49,8 +66,72 @@ def init_state():
 
 init_state()
 
-# --- EXCEL EXPORT LOGIC ---
+
+# --- UTILS ---
+def normalize(value):
+    return str(value).strip().lower().replace(" ", "")
+
+
+def highlight_mismatches(row):
+    styles = [""] * len(row)
+    consultant = str(row.get("Consultant", "")).strip()
+
+    if not consultant:
+        return styles
+
+    for i, col in enumerate(row.index):
+        if col in st.session_state.vendors:
+            vendor_value = str(row.get(col, "")).strip()
+
+            if not vendor_value:
+                styles[i] = "background-color: #fde68a"  # yellow
+            elif normalize(vendor_value) == normalize(consultant):
+                styles[i] = "background-color: #bbf7d0"  # green
+            else:
+                styles[i] = "background-color: #fecaca"  # red
+
+    return styles
+
+
+def build_csv_fallback(groups, commercial_data, vendors) -> bytes:
+    rows = []
+
+    for tower, group_data in groups.items():
+        for group_name, df in group_data.items():
+            rows.append([f"{tower} - {group_name}"])
+            rows.append(list(df.columns))
+
+            for _, row in df.iterrows():
+                rows.append([row.get(col, "") for col in df.columns])
+
+            rows.append([])
+
+    rows.append(["PRICING SUMMARY"])
+    rows.append(list(commercial_data["pricing"].columns))
+    for _, row in commercial_data["pricing"].iterrows():
+        rows.append([row.get(col, "") for col in commercial_data["pricing"].columns])
+    rows.append([])
+
+    rows.append(["PAYMENT TERMS"])
+    rows.append(list(commercial_data["payment"].columns))
+    for _, row in commercial_data["payment"].iterrows():
+        rows.append([row.get(col, "") for col in commercial_data["payment"].columns])
+    rows.append([])
+
+    rows.append(["DELIVERY PROGRAM"])
+    rows.append(list(commercial_data["delivery"].columns))
+    for _, row in commercial_data["delivery"].iterrows():
+        rows.append([row.get(col, "") for col in commercial_data["delivery"].columns])
+
+    output = io.StringIO()
+    pd.DataFrame(rows).to_csv(output, index=False, header=False)
+    return output.getvalue().encode("utf-8-sig")
+
+
 def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
+    if not OPENPYXL_AVAILABLE:
+        return build_csv_fallback(groups, commercial_data, vendors)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Comparison Report"
@@ -66,28 +147,39 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    def normalize(value):
-        return str(value).strip().lower().replace(" ", "")
-
     def apply_style(cell, fill=None, bold=False, color="000000"):
         cell.border = border
         cell.font = Font(bold=bold, color=color)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
         if fill:
             cell.fill = fill
 
     row_no = 1
 
-    # 1. Technical Comparison
+    # Technical Comparison
     for tower, group_data in groups.items():
         for group_name, df in group_data.items():
-            ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=len(df.columns))
+            ws.merge_cells(
+                start_row=row_no,
+                start_column=1,
+                end_row=row_no,
+                end_column=len(df.columns),
+            )
             title_cell = ws.cell(row_no, 1, f"{tower} - {group_name}")
             apply_style(title_cell, group_fill, True)
             row_no += 1
 
             for col_idx, col_name in enumerate(df.columns, 1):
-                apply_style(ws.cell(row_no, col_idx, col_name), header_fill, True, "FFFFFF")
+                apply_style(
+                    ws.cell(row_no, col_idx, col_name),
+                    header_fill,
+                    True,
+                    "FFFFFF",
+                )
             row_no += 1
 
             for _, row in df.iterrows():
@@ -95,6 +187,7 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
 
                 for col_idx, val in enumerate(row, 1):
                     col_name = df.columns[col_idx - 1]
+
                     fill = None
                     bold = False
 
@@ -112,24 +205,38 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
                         else:
                             fill = deviation_fill
 
-                    apply_style(ws.cell(row_no, col_idx, str(val)), fill, bold)
+                    apply_style(
+                        ws.cell(row_no, col_idx, str(val)),
+                        fill,
+                        bold,
+                    )
 
                 row_no += 1
 
             row_no += 2
 
-    # 2. Commercial Sections
+    # Commercial Sections
     def write_section(ws, row, title, df):
         if df.empty:
             return row
 
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(1, len(df.columns)))
+        ws.merge_cells(
+            start_row=row,
+            start_column=1,
+            end_row=row,
+            end_column=max(1, len(df.columns)),
+        )
         title_cell = ws.cell(row, 1, title)
         apply_style(title_cell, group_fill, True)
         row += 1
 
         for i, col in enumerate(df.columns, 1):
-            apply_style(ws.cell(row, i, col), header_fill, True, "FFFFFF")
+            apply_style(
+                ws.cell(row, i, col),
+                header_fill,
+                True,
+                "FFFFFF",
+            )
         row += 1
 
         for _, r in df.iterrows():
@@ -147,6 +254,7 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
     for col in ws.columns:
         col_letter = col[0].column_letter
         ws.column_dimensions[col_letter].width = 24
+
     ws.column_dimensions["A"].width = 32
 
     output = io.BytesIO()
@@ -158,11 +266,24 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
 # --- UI ---
 st.title("🛗 Radiant Bridges Pro Hub")
 
+if not OPENPYXL_AVAILABLE:
+    st.warning(
+        "openpyxl is not installed. App will run, but Excel export will download CSV fallback. "
+        "Add openpyxl to requirements.txt and reboot the app for formatted Excel."
+    )
+
 # Technical comparison editor
 st.subheader("Technical Comparison")
 
-tower = st.selectbox("Select Tower", list(st.session_state.groups.keys()))
-group = st.selectbox("Select Group", list(st.session_state.groups[tower].keys()))
+tower = st.selectbox(
+    "Select Tower",
+    list(st.session_state.groups.keys()),
+)
+
+group = st.selectbox(
+    "Select Group",
+    list(st.session_state.groups[tower].keys()),
+)
 
 st.session_state.groups[tower][group] = st.data_editor(
     st.session_state.groups[tower][group],
@@ -174,28 +295,15 @@ st.session_state.groups[tower][group] = st.data_editor(
 # Compliance preview
 st.subheader("Deviation Preview")
 
-def highlight_mismatches(row):
-    styles = [""] * len(row)
-    consultant = str(row.get("Consultant", "")).strip()
-
-    if not consultant:
-        return styles
-
-    for i, col in enumerate(row.index):
-        if col in st.session_state.vendors:
-            vendor_value = str(row.get(col, "")).strip()
-
-            if not vendor_value:
-                styles[i] = "background-color: #fde68a"
-            elif vendor_value.lower().replace(" ", "") == consultant.lower().replace(" ", ""):
-                styles[i] = "background-color: #bbf7d0"
-            else:
-                styles[i] = "background-color: #fecaca"
-
-    return styles
+st.caption(
+    "Green = matching with consultant, Red = deviation, Yellow = vendor value missing."
+)
 
 st.dataframe(
-    st.session_state.groups[tower][group].style.apply(highlight_mismatches, axis=1),
+    st.session_state.groups[tower][group].style.apply(
+        highlight_mismatches,
+        axis=1,
+    ),
     use_container_width=True,
 )
 
@@ -234,11 +342,21 @@ data = build_highlighted_excel(
     st.session_state.vendors,
 )
 
-st.download_button(
-    "📥 Download Full Highlighted Excel Report",
-    data=data,
-    file_name="Radiant_Bridges_Report.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    use_container_width=True,
-    type="primary",
-)
+if OPENPYXL_AVAILABLE:
+    st.download_button(
+        "📥 Download Full Highlighted Excel Report",
+        data=data,
+        file_name="Radiant_Bridges_Report.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        type="primary",
+    )
+else:
+    st.download_button(
+        "📥 Download CSV Fallback Report",
+        data=data,
+        file_name="Radiant_Bridges_Report.csv",
+        mime="text/csv",
+        use_container_width=True,
+        type="primary",
+    )
