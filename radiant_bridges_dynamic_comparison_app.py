@@ -52,8 +52,16 @@ def init_state():
 
     if "groups" not in st.session_state:
         st.session_state.groups = {
-            "Tower A": {"PL1 & PL2": make_default_df(st.session_state.vendors)}
+            "Tower A": {
+                "PL1 & PL2": make_default_df(st.session_state.vendors)
+            }
         }
+
+    if "active_tower" not in st.session_state:
+        st.session_state.active_tower = "Tower A"
+
+    if "active_group" not in st.session_state:
+        st.session_state.active_group = "PL1 & PL2"
 
     if "commercial_data" not in st.session_state:
         st.session_state.commercial_data = {
@@ -62,9 +70,6 @@ def init_state():
             "delivery": pd.DataFrame(columns=["Milestone"] + st.session_state.vendors),
             "notes": pd.DataFrame(columns=["Note"] + st.session_state.vendors),
         }
-
-    if "attachments" not in st.session_state:
-        st.session_state.attachments = []
 
     if "editor_version" not in st.session_state:
         st.session_state.editor_version = 0
@@ -86,19 +91,6 @@ def normalize(value):
     )
 
 
-def detect_target_column(file_name: str, vendors: List[str]):
-    name = normalize(file_name)
-
-    if "consultant" in name or "spec" in name or "specification" in name:
-        return "Consultant"
-
-    for vendor in vendors:
-        if normalize(vendor) in name:
-            return vendor
-
-    return None
-
-
 def sync_vendor_columns():
     required_cols = ["Specification", "Consultant"] + st.session_state.vendors
 
@@ -115,16 +107,16 @@ def sync_vendor_columns():
     for key in st.session_state.commercial_data:
         df = st.session_state.commercial_data[key]
         first_col = df.columns[0] if len(df.columns) else "Description"
-        required = [first_col] + st.session_state.vendors
+        required_cols = [first_col] + st.session_state.vendors
 
-        for col in required:
+        for col in required_cols:
             if col not in df.columns:
                 df[col] = ""
 
-        st.session_state.commercial_data[key] = df[required]
+        st.session_state.commercial_data[key] = df[required_cols]
 
 
-def highlight_main_table(row):
+def highlight_deviation(row):
     styles = [""] * len(row)
     consultant = str(row.get("Consultant", "")).strip()
 
@@ -134,43 +126,52 @@ def highlight_main_table(row):
     for i, col in enumerate(row.index):
         if col in st.session_state.vendors:
             vendor_value = str(row.get(col, "")).strip()
-
             if vendor_value and normalize(vendor_value) != normalize(consultant):
                 styles[i] = "background-color: #fde68a"
 
     return styles
 
 
-def read_pdf_as_rows(uploaded_file) -> List[str]:
+def detect_target_column(file_name: str):
+    name = normalize(file_name)
+
+    if "consultant" in name or "spec" in name or "specification" in name:
+        return "Consultant"
+
+    for vendor in st.session_state.vendors:
+        if normalize(vendor) in name:
+            return vendor
+
+    return None
+
+
+def read_pdf_lines(uploaded_file):
     if not PDF_AVAILABLE:
-        return ["pdfplumber is not installed. Please add pdfplumber to requirements.txt"]
+        return []
 
     lines = []
 
     with pdfplumber.open(uploaded_file) as pdf:
-        for page_no, page in enumerate(pdf.pages, start=1):
+        for page in pdf.pages:
             tables = page.extract_tables()
-
             for table in tables or []:
                 for row in table:
-                    clean_row = [str(x).strip() for x in row if x]
-                    if clean_row:
-                        lines.append(" | ".join(clean_row))
+                    cleaned = [str(x).strip() for x in row if x]
+                    if cleaned:
+                        lines.append(" | ".join(cleaned))
 
             text = page.extract_text()
             if text:
-                for line in text.split("\n"):
-                    if line.strip():
-                        lines.append(line.strip())
+                lines.extend([x.strip() for x in text.split("\n") if x.strip()])
 
     return lines
 
 
-def read_file_as_rows(uploaded_file) -> List[str]:
+def read_file_lines(uploaded_file):
     name = uploaded_file.name.lower()
 
     if name.endswith(".pdf"):
-        return read_pdf_as_rows(uploaded_file)
+        return read_pdf_lines(uploaded_file)
 
     if name.endswith(".csv"):
         df = pd.read_csv(uploaded_file).fillna("")
@@ -183,61 +184,48 @@ def read_file_as_rows(uploaded_file) -> List[str]:
     return []
 
 
-def extract_value_by_spec(full_text: str, spec: str) -> str:
-    lines = full_text.splitlines()
+def extract_value_by_spec(full_text: str, spec: str):
     spec_key = normalize(spec)
 
-    for line in lines:
-        clean_line = normalize(line)
-
-        if spec_key and spec_key in clean_line:
+    for line in full_text.splitlines():
+        if spec_key and spec_key in normalize(line):
             for sep in [":", "-", "–", "|"]:
                 if sep in line:
                     parts = line.split(sep, 1)
                     if len(parts) == 2 and parts[1].strip():
                         return parts[1].strip()
-
             return line.strip()
 
     return ""
 
 
-def auto_fill_column_exact(rows: List[str], target_col: str, tower: str, group: str):
+def auto_fill_exact(rows, target_col, tower, group):
     df = st.session_state.groups[tower][group].copy()
-
-    if target_col not in df.columns:
-        df[target_col] = ""
-
     full_text = "\n".join(rows)
-    filled_count = 0
+    filled = 0
 
     for idx, row in df.iterrows():
         spec = str(row.get("Specification", "")).strip()
-
         if not spec:
             continue
 
         value = extract_value_by_spec(full_text, spec)
-
         if value:
             df.at[idx, target_col] = value
-            filled_count += 1
+            filled += 1
 
     st.session_state.groups[tower][group] = df
     st.session_state.editor_version += 1
 
-    if filled_count == 0:
-        return False, f"No matching specification values found for {target_col}."
-
-    return True, f"Filled {filled_count} matching specification values under {target_col}."
+    return filled
 
 
-def build_excel(groups, commercial_data, vendors) -> bytes:
+def build_excel():
     if not OPENPYXL_AVAILABLE:
         output = io.StringIO()
         rows = []
 
-        for tower, group_data in groups.items():
+        for tower, group_data in st.session_state.groups.items():
             for group, df in group_data.items():
                 rows.append([f"{tower} - {group}"])
                 rows.append(list(df.columns))
@@ -251,7 +239,7 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
             ("DELIVERY PROGRAM", "delivery"),
             ("NOTES", "notes"),
         ]:
-            df = commercial_data[key]
+            df = st.session_state.commercial_data[key]
             rows.append([title])
             rows.append(list(df.columns))
             for _, r in df.iterrows():
@@ -273,7 +261,7 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
     thin = Side(style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    def apply_style(cell, fill=None, bold=False, color="000000"):
+    def style(cell, fill=None, bold=False, color="000000"):
         cell.border = border
         cell.font = Font(bold=bold, color=color)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -282,14 +270,14 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
 
     row_no = 1
 
-    for tower, group_data in groups.items():
+    for tower, group_data in st.session_state.groups.items():
         for group, df in group_data.items():
             ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=len(df.columns))
-            apply_style(ws.cell(row_no, 1, f"{tower} - {group}"), group_fill, True)
+            style(ws.cell(row_no, 1, f"{tower} - {group}"), group_fill, True)
             row_no += 1
 
             for col_idx, col_name in enumerate(df.columns, 1):
-                apply_style(ws.cell(row_no, col_idx, col_name), header_fill, True, "FFFFFF")
+                style(ws.cell(row_no, col_idx, col_name), header_fill, True, "FFFFFF")
             row_no += 1
 
             for _, r in df.iterrows():
@@ -304,12 +292,12 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
                         fill = spec_fill
                         bold = True
 
-                    if col_name in vendors and consultant:
+                    if col_name in st.session_state.vendors and consultant:
                         vendor_value = str(r.get(col_name, "")).strip()
                         if vendor_value and normalize(vendor_value) != normalize(consultant):
                             fill = deviation_fill
 
-                    apply_style(ws.cell(row_no, col_idx, value), fill, bold)
+                    style(ws.cell(row_no, col_idx, value), fill, bold)
 
                 row_no += 1
 
@@ -320,24 +308,24 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
             return row_no
 
         ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=len(df.columns))
-        apply_style(ws.cell(row_no, 1, title), group_fill, True)
+        style(ws.cell(row_no, 1, title), group_fill, True)
         row_no += 1
 
         for col_idx, col_name in enumerate(df.columns, 1):
-            apply_style(ws.cell(row_no, col_idx, col_name), header_fill, True, "FFFFFF")
+            style(ws.cell(row_no, col_idx, col_name), header_fill, True, "FFFFFF")
         row_no += 1
 
         for _, r in df.iterrows():
             for col_idx, col_name in enumerate(df.columns, 1):
-                apply_style(ws.cell(row_no, col_idx, str(r.get(col_name, ""))))
+                style(ws.cell(row_no, col_idx, str(r.get(col_name, ""))))
             row_no += 1
 
         return row_no + 2
 
-    row_no = write_section("PRICING SUMMARY", commercial_data["pricing"], row_no)
-    row_no = write_section("PAYMENT TERMS", commercial_data["payment"], row_no)
-    row_no = write_section("DELIVERY PROGRAM", commercial_data["delivery"], row_no)
-    row_no = write_section("NOTES", commercial_data["notes"], row_no)
+    row_no = write_section("PRICING SUMMARY", st.session_state.commercial_data["pricing"], row_no)
+    row_no = write_section("PAYMENT TERMS", st.session_state.commercial_data["payment"], row_no)
+    row_no = write_section("DELIVERY PROGRAM", st.session_state.commercial_data["delivery"], row_no)
+    row_no = write_section("NOTES", st.session_state.commercial_data["notes"], row_no)
 
     for col_idx in range(1, ws.max_column + 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = 24
@@ -358,13 +346,13 @@ with st.sidebar:
     vendor_text = st.text_area(
         "Edit vendor names, one per line",
         "\n".join(st.session_state.vendors),
-        height=160,
+        height=150,
     )
 
     if st.button("Update Vendors"):
-        new_vendors = [v.strip().upper() for v in vendor_text.splitlines() if v.strip()]
-        if new_vendors:
-            st.session_state.vendors = new_vendors
+        vendors = [x.strip().upper() for x in vendor_text.splitlines() if x.strip()]
+        if vendors:
+            st.session_state.vendors = vendors
             sync_vendor_columns()
             st.session_state.editor_version += 1
             st.rerun()
@@ -372,29 +360,37 @@ with st.sidebar:
     st.divider()
     st.header("Tower / Group Setup")
 
-    tower_names = list(st.session_state.groups.keys())
-    selected_tower = st.selectbox("Select Tower", tower_names)
+    selected_tower = st.selectbox(
+        "Select Tower",
+        list(st.session_state.groups.keys()),
+        key="active_tower_select",
+    )
 
-    new_tower_name = st.text_input("Add new tower name")
+    st.session_state.active_tower = selected_tower
+
+    new_tower = st.text_input("Add New Tower")
 
     if st.button("Add Tower"):
-        if new_tower_name.strip():
-            st.session_state.groups[new_tower_name.strip()] = {
+        name = new_tower.strip()
+        if name:
+            st.session_state.groups[name] = {
                 "Group 1": make_default_df(st.session_state.vendors)
             }
+            st.session_state.active_tower = name
             st.session_state.editor_version += 1
             st.rerun()
 
-    rename_tower = st.text_input("Rename selected tower", selected_tower)
+    rename_tower = st.text_input("Edit Tower Name", selected_tower)
 
-    if st.button("Rename Tower"):
+    if st.button("Save Tower Name"):
         new_name = rename_tower.strip()
         if new_name and new_name != selected_tower:
             st.session_state.groups[new_name] = st.session_state.groups.pop(selected_tower)
+            st.session_state.active_tower = new_name
             st.session_state.editor_version += 1
             st.rerun()
 
-    if st.button("Remove Selected Tower"):
+    if st.button("Remove Tower"):
         if len(st.session_state.groups) > 1:
             del st.session_state.groups[selected_tower]
             st.session_state.editor_version += 1
@@ -402,27 +398,37 @@ with st.sidebar:
         else:
             st.warning("At least one tower is required.")
 
-    group_names = list(st.session_state.groups[selected_tower].keys())
-    selected_group = st.selectbox("Select Group", group_names)
+    selected_group = st.selectbox(
+        "Select Group",
+        list(st.session_state.groups[selected_tower].keys()),
+        key="active_group_select",
+    )
 
-    new_group_name = st.text_input("Add new group name")
+    st.session_state.active_group = selected_group
+
+    new_group = st.text_input("Add New Group")
 
     if st.button("Add Group"):
-        if new_group_name.strip():
-            st.session_state.groups[selected_tower][new_group_name.strip()] = make_default_df(st.session_state.vendors)
+        name = new_group.strip()
+        if name:
+            st.session_state.groups[selected_tower][name] = make_default_df(st.session_state.vendors)
+            st.session_state.active_group = name
             st.session_state.editor_version += 1
             st.rerun()
 
-    rename_group = st.text_input("Rename selected group", selected_group)
+    rename_group = st.text_input("Edit Group Name", selected_group)
 
-    if st.button("Rename Group"):
+    if st.button("Save Group Name"):
         new_name = rename_group.strip()
         if new_name and new_name != selected_group:
-            st.session_state.groups[selected_tower][new_name] = st.session_state.groups[selected_tower].pop(selected_group)
+            st.session_state.groups[selected_tower][new_name] = (
+                st.session_state.groups[selected_tower].pop(selected_group)
+            )
+            st.session_state.active_group = new_name
             st.session_state.editor_version += 1
             st.rerun()
 
-    if st.button("Remove Selected Group"):
+    if st.button("Remove Group"):
         if len(st.session_state.groups[selected_tower]) > 1:
             del st.session_state.groups[selected_tower][selected_group]
             st.session_state.editor_version += 1
@@ -431,12 +437,16 @@ with st.sidebar:
             st.warning("At least one group is required.")
 
 
-st.subheader(f"Technical Comparison - {selected_tower} / {selected_group}")
+selected_tower = st.session_state.active_tower
+selected_group = st.session_state.active_group
 
-current_df = st.session_state.groups[selected_tower][selected_group]
+st.subheader(f"Comparison Table - {selected_tower} / {selected_group}")
+st.caption("Yellow cells indicate vendor deviation from consultant specification.")
+
+df = st.session_state.groups[selected_tower][selected_group]
 
 edited_df = st.data_editor(
-    current_df,
+    df,
     num_rows="dynamic",
     use_container_width=True,
     key=f"editor_{selected_tower}_{selected_group}_{st.session_state.editor_version}",
@@ -444,52 +454,40 @@ edited_df = st.data_editor(
 
 st.session_state.groups[selected_tower][selected_group] = edited_df
 
-st.markdown("### Highlighted Comparison")
-st.caption("Yellow cells show vendor deviation from consultant specification.")
-
 st.dataframe(
-    edited_df.style.apply(highlight_main_table, axis=1),
+    edited_df.style.apply(highlight_deviation, axis=1),
     use_container_width=True,
 )
 
-
 st.divider()
-st.subheader("Upload Specification / Vendor Offer PDFs")
+st.subheader("Upload Specification / Vendor Offer")
 
 uploaded_files = st.file_uploader(
-    "Upload PDF/Excel/CSV files. File name should match vendor name or consultant/spec.",
+    "Upload PDF / Excel / CSV files. File name must match Consultant / Spec / Vendor name.",
     type=["pdf", "xlsx", "xls", "csv"],
     accept_multiple_files=True,
 )
 
 if uploaded_files:
     for f in uploaded_files:
-        target_col = detect_target_column(f.name, st.session_state.vendors)
+        target = detect_target_column(f.name)
 
-        if not target_col:
-            st.warning(f"Could not detect target column for: {f.name}")
+        if not target:
+            st.warning(f"Target column not detected for: {f.name}")
             continue
 
-        rows = read_file_as_rows(f)
+        rows = read_file_lines(f)
+        filled = auto_fill_exact(rows, target, selected_tower, selected_group)
 
-        ok, msg = auto_fill_column_exact(
-            rows=rows,
-            target_col=target_col,
-            tower=selected_tower,
-            group=selected_group,
-        )
-
-        if ok:
-            st.success(f"{f.name}: {msg}")
+        if filled:
+            st.success(f"{f.name}: {filled} values filled under {target}.")
         else:
-            st.warning(f"{f.name}: {msg}")
+            st.warning(f"{f.name}: no matching specification values found.")
 
     st.rerun()
 
-
 st.divider()
 st.subheader("Pricing Summary")
-
 st.session_state.commercial_data["pricing"] = st.data_editor(
     st.session_state.commercial_data["pricing"],
     num_rows="dynamic",
@@ -498,7 +496,6 @@ st.session_state.commercial_data["pricing"] = st.data_editor(
 )
 
 st.subheader("Payment Terms")
-
 st.session_state.commercial_data["payment"] = st.data_editor(
     st.session_state.commercial_data["payment"],
     num_rows="dynamic",
@@ -507,7 +504,6 @@ st.session_state.commercial_data["payment"] = st.data_editor(
 )
 
 st.subheader("Delivery Program")
-
 st.session_state.commercial_data["delivery"] = st.data_editor(
     st.session_state.commercial_data["delivery"],
     num_rows="dynamic",
@@ -516,7 +512,6 @@ st.session_state.commercial_data["delivery"] = st.data_editor(
 )
 
 st.subheader("Notes")
-
 st.session_state.commercial_data["notes"] = st.data_editor(
     st.session_state.commercial_data["notes"],
     num_rows="dynamic",
@@ -524,15 +519,10 @@ st.session_state.commercial_data["notes"] = st.data_editor(
     key="notes_editor",
 )
 
-
 st.divider()
 st.subheader("Generate Excel")
 
-excel_data = build_excel(
-    st.session_state.groups,
-    st.session_state.commercial_data,
-    st.session_state.vendors,
-)
+excel_data = build_excel()
 
 if OPENPYXL_AVAILABLE:
     st.download_button(
