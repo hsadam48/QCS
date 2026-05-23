@@ -62,6 +62,9 @@ def init_state():
     if "attachments" not in st.session_state:
         st.session_state.attachments = []
 
+    if "editor_version" not in st.session_state:
+        st.session_state.editor_version = 0
+
 
 init_state()
 
@@ -71,11 +74,11 @@ def normalize(value):
 
 
 def sync_vendor_columns():
+    required_cols = ["Specification", "Consultant"] + st.session_state.vendors
+
     for tower in st.session_state.groups:
         for group in st.session_state.groups[tower]:
             df = st.session_state.groups[tower][group]
-
-            required_cols = ["Specification", "Consultant"] + st.session_state.vendors
 
             for col in required_cols:
                 if col not in df.columns:
@@ -85,14 +88,15 @@ def sync_vendor_columns():
 
     for key in st.session_state.commercial_data:
         df = st.session_state.commercial_data[key]
-        first_col = df.columns[0] if len(df.columns) else "Description"
-        required_cols = [first_col] + st.session_state.vendors
 
-        for col in required_cols:
+        first_col = df.columns[0] if len(df.columns) else "Description"
+        required = [first_col] + st.session_state.vendors
+
+        for col in required:
             if col not in df.columns:
                 df[col] = ""
 
-        st.session_state.commercial_data[key] = df[required_cols]
+        st.session_state.commercial_data[key] = df[required]
 
 
 def highlight_main_table(row):
@@ -110,6 +114,18 @@ def highlight_main_table(row):
                 styles[i] = "background-color: #fde68a"
 
     return styles
+
+
+def read_uploaded_table(uploaded_file) -> pd.DataFrame:
+    name = uploaded_file.name.lower()
+
+    if name.endswith(".csv"):
+        return pd.read_csv(uploaded_file).fillna("")
+
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(uploaded_file).fillna("")
+
+    raise ValueError("Mapping supports only Excel and CSV files.")
 
 
 def build_excel(groups, commercial_data, vendors) -> bytes:
@@ -164,7 +180,12 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
 
     for tower, group_data in groups.items():
         for group, df in group_data.items():
-            ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=len(df.columns))
+            ws.merge_cells(
+                start_row=row_no,
+                start_column=1,
+                end_row=row_no,
+                end_column=len(df.columns),
+            )
             apply_style(ws.cell(row_no, 1, f"{tower} - {group}"), group_fill, True)
             row_no += 1
 
@@ -199,7 +220,12 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
         if df.empty:
             return row_no
 
-        ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=len(df.columns))
+        ws.merge_cells(
+            start_row=row_no,
+            start_column=1,
+            end_row=row_no,
+            end_column=len(df.columns),
+        )
         apply_style(ws.cell(row_no, 1, title), group_fill, True)
         row_no += 1
 
@@ -221,6 +247,7 @@ def build_excel(groups, commercial_data, vendors) -> bytes:
 
     for col_idx in range(1, ws.max_column + 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = 24
+
     ws.column_dimensions["A"].width = 32
 
     output = io.BytesIO()
@@ -233,7 +260,6 @@ st.title("🛗 Radiant Bridges Pro Hub")
 
 if not OPENPYXL_AVAILABLE:
     st.warning("openpyxl is not installed. Excel will be exported as CSV fallback.")
-
 
 with st.sidebar:
     st.header("Vendor Names")
@@ -249,6 +275,7 @@ with st.sidebar:
         if new_vendors:
             st.session_state.vendors = new_vendors
             sync_vendor_columns()
+            st.session_state.editor_version += 1
             st.rerun()
 
     st.divider()
@@ -264,6 +291,7 @@ with st.sidebar:
             st.session_state.groups[new_tower_name.strip()] = {
                 "Group 1": make_default_df(st.session_state.vendors)
             }
+            st.session_state.editor_version += 1
             st.rerun()
 
     rename_tower = st.text_input("Rename selected tower", selected_tower)
@@ -271,11 +299,13 @@ with st.sidebar:
     if st.button("Rename Tower"):
         if rename_tower.strip() and rename_tower.strip() != selected_tower:
             st.session_state.groups[rename_tower.strip()] = st.session_state.groups.pop(selected_tower)
+            st.session_state.editor_version += 1
             st.rerun()
 
     if st.button("Remove Selected Tower"):
         if len(st.session_state.groups) > 1:
             del st.session_state.groups[selected_tower]
+            st.session_state.editor_version += 1
             st.rerun()
         else:
             st.warning("At least one tower is required.")
@@ -288,6 +318,7 @@ with st.sidebar:
     if st.button("Add Group"):
         if new_group_name.strip():
             st.session_state.groups[selected_tower][new_group_name.strip()] = make_default_df(st.session_state.vendors)
+            st.session_state.editor_version += 1
             st.rerun()
 
     rename_group = st.text_input("Rename selected group", selected_group)
@@ -295,11 +326,13 @@ with st.sidebar:
     if st.button("Rename Group"):
         if rename_group.strip() and rename_group.strip() != selected_group:
             st.session_state.groups[selected_tower][rename_group.strip()] = st.session_state.groups[selected_tower].pop(selected_group)
+            st.session_state.editor_version += 1
             st.rerun()
 
     if st.button("Remove Selected Group"):
         if len(st.session_state.groups[selected_tower]) > 1:
             del st.session_state.groups[selected_tower][selected_group]
+            st.session_state.editor_version += 1
             st.rerun()
         else:
             st.warning("At least one group is required.")
@@ -313,7 +346,7 @@ edited_df = st.data_editor(
     current_df,
     num_rows="dynamic",
     use_container_width=True,
-    key=f"editor_{selected_tower}_{selected_group}",
+    key=f"editor_{selected_tower}_{selected_group}_{st.session_state.editor_version}",
 )
 
 st.session_state.groups[selected_tower][selected_group] = edited_df
@@ -332,20 +365,105 @@ st.subheader("Upload Specifications / Tender Offers")
 
 uploaded_files = st.file_uploader(
     "Upload specs, tender offers, vendor quotations, or supporting files",
-    type=["pdf", "xlsx", "xls", "csv", "docx"],
+    type=["xlsx", "xls", "csv", "pdf", "docx"],
     accept_multiple_files=True,
 )
 
 if uploaded_files:
+    existing_names = {item["name"] for item in st.session_state.attachments}
+
     for f in uploaded_files:
-        st.session_state.attachments.append(
-            {"name": f.name, "size": f.size, "type": f.type}
-        )
+        if f.name not in existing_names:
+            st.session_state.attachments.append(
+                {
+                    "name": f.name,
+                    "size": f.size,
+                    "type": f.type,
+                    "bytes": f.getvalue(),
+                }
+            )
 
 if st.session_state.attachments:
     st.write("Uploaded Files")
-    for item in st.session_state.attachments:
-        st.write(f"📎 {item['name']} - {round(item['size']/1024, 1)} KB")
+
+    for i, item in enumerate(list(st.session_state.attachments)):
+        c1, c2, c3 = st.columns([5, 2, 1])
+        c1.write(f"📎 {item['name']}")
+        c2.write(f"{round(item['size'] / 1024, 1)} KB")
+
+        if c3.button("Remove", key=f"remove_attach_{i}"):
+            st.session_state.attachments.pop(i)
+            st.rerun()
+
+    st.divider()
+    st.subheader("Map Uploaded File to Comparison Table")
+
+    mappable_files = [
+        item for item in st.session_state.attachments
+        if item["name"].lower().endswith((".xlsx", ".xls", ".csv"))
+    ]
+
+    if mappable_files:
+        selected_file_name = st.selectbox(
+            "Select uploaded Excel/CSV file for mapping",
+            [item["name"] for item in mappable_files],
+        )
+
+        selected_file = next(
+            item for item in mappable_files
+            if item["name"] == selected_file_name
+        )
+
+        file_obj = io.BytesIO(selected_file["bytes"])
+        file_obj.name = selected_file["name"]
+
+        try:
+            raw_df = read_uploaded_table(file_obj)
+
+            st.write("Preview uploaded data")
+            st.dataframe(raw_df.head(10), use_container_width=True)
+
+            target_columns = ["Consultant"] + st.session_state.vendors
+            source_columns = ["-- Do not import --"] + list(raw_df.columns)
+
+            mapping = {}
+
+            map_cols = st.columns(min(3, len(target_columns)))
+
+            for i, target in enumerate(target_columns):
+                with map_cols[i % len(map_cols)]:
+                    mapping[target] = st.selectbox(
+                        f"Map to {target}",
+                        source_columns,
+                        key=f"map_{selected_file_name}_{target}",
+                    )
+
+            if st.button("Apply Mapping to Current Table", type="primary"):
+                df = st.session_state.groups[selected_tower][selected_group].copy()
+                max_rows = min(len(df), len(raw_df))
+
+                for target, source in mapping.items():
+                    if source != "-- Do not import --":
+                        df.loc[:max_rows - 1, target] = (
+                            raw_df[source]
+                            .astype(str)
+                            .head(max_rows)
+                            .tolist()
+                        )
+
+                st.session_state.groups[selected_tower][selected_group] = df
+                st.session_state.editor_version += 1
+
+                st.success("Mapping applied successfully.")
+                st.rerun()
+
+        except Exception as exc:
+            st.error(f"Unable to map uploaded file: {exc}")
+
+    else:
+        st.info("Mapping is available only for Excel and CSV files. PDF/DOCX files are stored as attachments only.")
+else:
+    st.info("No files uploaded yet.")
 
 
 st.divider()
