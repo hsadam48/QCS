@@ -1,85 +1,36 @@
 import io
-import json
-from datetime import date
-from typing import List, Dict, Any
+from typing import List
 
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
-try:
-    import pdfplumber
-    PDF_READ_AVAILABLE = True
-except Exception:
-    PDF_READ_AVAILABLE = False
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Radiant Bridges Pro", page_icon="🛗", layout="wide")
 
-try:
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-    OPENPYXL_AVAILABLE = True
-except Exception:
-    OPENPYXL_AVAILABLE = False
-
-st.set_page_config(
-    page_title="Radiant Bridges Dynamic Comparison App",
-    page_icon="🛗",
-    layout="wide",
-)
+DEFAULT_VENDORS = ["KONE", "TKE", "EEE", "AG MELCO"]
 
 SPEC_LIST = [
     "CAPACITY", "SPEED", "DOOR TYPE", "DOOR SIZE (W X H)",
     "SHAFT SIZE (W X D)", "CABIN SIZE (W X D X H)",
-    "OVER HEAD HEIGHT", "PIT DEPTH", "NO. OF LIFTS",
-    "Lift code", "Machine location", "Operation", "No. of Stops",
-    "Travel Height", "Car wall", "Front Wall", "Ceiling", "Mirror",
-    "Hand rail", "Skirting", "Decoration", "Door Material",
-    "Sill Material", "COP Panel", "LOP",
-    "Landing Jamb In Ground Floor", "Landing Jamb In Other Floors",
-    "Hall Indicator", "Made", "Remarks"
+    "OVER HEAD HEIGHT", "PIT DEPTH", "NO. OF LIFTS"
 ]
 
-DEFAULT_VENDORS = ["KONE", "TKE", "EEE", "AG MELCO"]
-
-DEFAULT_PROJECT_INFO = {
-    "project": "RADIANT BRIDGES PROJECT",
-    "document_title": "ELEVATOR TECHNICAL COMPARISON",
-    "client": "Radiant Real Estate",
-    "main_contractor": "ATGC Transport & General Contracting L.L.C.-SPC",
-    "material_work": "Elevators",
-    "pr_no": "",
-    "revision": "Rev. 0",
-    "comparison_date": date.today().isoformat(),
-}
-
-
+# --- INITIALIZATION ---
 def make_default_df(vendors: List[str]) -> pd.DataFrame:
-    columns = ["Specification", "Consultant"] + vendors
-    df = pd.DataFrame("", index=range(len(SPEC_LIST)), columns=columns)
+    df = pd.DataFrame(
+        "",
+        index=range(len(SPEC_LIST)),
+        columns=["Specification", "Consultant"] + vendors
+    )
     df["Specification"] = SPEC_LIST
     return df
-
-
-def sync_vendor_columns(df: pd.DataFrame, vendors: List[str]) -> pd.DataFrame:
-    required_cols = ["Specification", "Consultant"] + vendors
-
-    if "Specification" not in df.columns:
-        df.insert(0, "Specification", "")
-
-    if "Consultant" not in df.columns:
-        df.insert(1, "Consultant", "")
-
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = ""
-
-    return df[required_cols].fillna("").copy()
 
 
 def init_state():
     if "vendors" not in st.session_state:
         st.session_state.vendors = DEFAULT_VENDORS.copy()
-
-    if "project_info" not in st.session_state:
-        st.session_state.project_info = DEFAULT_PROJECT_INFO.copy()
 
     if "groups" not in st.session_state:
         st.session_state.groups = {
@@ -88,179 +39,140 @@ def init_state():
             }
         }
 
-    if "active_tower" not in st.session_state:
-        st.session_state.active_tower = "Tower A"
-
-    if "active_group" not in st.session_state:
-        st.session_state.active_group = "PL1 & PL2"
-
-    if "attachments" not in st.session_state:
-        st.session_state.attachments = []
-
-    if "editor_version" not in st.session_state:
-        st.session_state.editor_version = 0
+    if "commercial_data" not in st.session_state:
+        st.session_state.commercial_data = {
+            "pricing": pd.DataFrame(columns=["Description"] + st.session_state.vendors),
+            "payment": pd.DataFrame(columns=["Term"] + st.session_state.vendors),
+            "delivery": pd.DataFrame(columns=["Milestone"] + st.session_state.vendors),
+        }
 
 
-def sync_all_groups():
-    for tower in st.session_state.groups:
-        for group in st.session_state.groups[tower]:
-            st.session_state.groups[tower][group] = sync_vendor_columns(
-                st.session_state.groups[tower][group],
-                st.session_state.vendors,
-            )
+init_state()
+
+# --- EXCEL EXPORT LOGIC ---
+def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Comparison Report"
+
+    # Styles
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    group_fill = PatternFill("solid", fgColor="BDD7EE")
+    spec_fill = PatternFill("solid", fgColor="E2F0D9")
+    match_fill = PatternFill("solid", fgColor="BBF7D0")
+    deviation_fill = PatternFill("solid", fgColor="FECACA")
+    missing_fill = PatternFill("solid", fgColor="FDE68A")
+
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def normalize(value):
+        return str(value).strip().lower().replace(" ", "")
+
+    def apply_style(cell, fill=None, bold=False, color="000000"):
+        cell.border = border
+        cell.font = Font(bold=bold, color=color)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        if fill:
+            cell.fill = fill
+
+    row_no = 1
+
+    # 1. Technical Comparison
+    for tower, group_data in groups.items():
+        for group_name, df in group_data.items():
+            ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=len(df.columns))
+            title_cell = ws.cell(row_no, 1, f"{tower} - {group_name}")
+            apply_style(title_cell, group_fill, True)
+            row_no += 1
+
+            for col_idx, col_name in enumerate(df.columns, 1):
+                apply_style(ws.cell(row_no, col_idx, col_name), header_fill, True, "FFFFFF")
+            row_no += 1
+
+            for _, row in df.iterrows():
+                consultant_value = str(row.get("Consultant", "")).strip()
+
+                for col_idx, val in enumerate(row, 1):
+                    col_name = df.columns[col_idx - 1]
+                    fill = None
+                    bold = False
+
+                    if col_name == "Specification":
+                        fill = spec_fill
+                        bold = True
+
+                    elif col_name in vendors and consultant_value:
+                        vendor_value = str(val).strip()
+
+                        if not vendor_value:
+                            fill = missing_fill
+                        elif normalize(vendor_value) == normalize(consultant_value):
+                            fill = match_fill
+                        else:
+                            fill = deviation_fill
+
+                    apply_style(ws.cell(row_no, col_idx, str(val)), fill, bold)
+
+                row_no += 1
+
+            row_no += 2
+
+    # 2. Commercial Sections
+    def write_section(ws, row, title, df):
+        if df.empty:
+            return row
+
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(1, len(df.columns)))
+        title_cell = ws.cell(row, 1, title)
+        apply_style(title_cell, group_fill, True)
+        row += 1
+
+        for i, col in enumerate(df.columns, 1):
+            apply_style(ws.cell(row, i, col), header_fill, True, "FFFFFF")
+        row += 1
+
+        for _, r in df.iterrows():
+            for i, val in enumerate(r, 1):
+                apply_style(ws.cell(row, i, str(val)))
+            row += 1
+
+        return row + 2
+
+    row_no = write_section(ws, row_no, "PRICING SUMMARY", commercial_data["pricing"])
+    row_no = write_section(ws, row_no, "PAYMENT TERMS", commercial_data["payment"])
+    row_no = write_section(ws, row_no, "DELIVERY PROGRAM", commercial_data["delivery"])
+
+    # Column widths
+    for col in ws.columns:
+        col_letter = col[0].column_letter
+        ws.column_dimensions[col_letter].width = 24
+    ws.column_dimensions["A"].width = 32
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
 
 
-def ensure_active_selection():
-    if not st.session_state.groups:
-        st.session_state.active_tower = ""
-        st.session_state.active_group = ""
-        return
+# --- UI ---
+st.title("🛗 Radiant Bridges Pro Hub")
 
-    if st.session_state.active_tower not in st.session_state.groups:
-        st.session_state.active_tower = list(st.session_state.groups.keys())[0]
+# Technical comparison editor
+st.subheader("Technical Comparison")
 
-    if not st.session_state.groups[st.session_state.active_tower]:
-        st.session_state.active_group = ""
-        return
+tower = st.selectbox("Select Tower", list(st.session_state.groups.keys()))
+group = st.selectbox("Select Group", list(st.session_state.groups[tower].keys()))
 
-    if st.session_state.active_group not in st.session_state.groups[st.session_state.active_tower]:
-        st.session_state.active_group = list(st.session_state.groups[st.session_state.active_tower].keys())[0]
+st.session_state.groups[tower][group] = st.data_editor(
+    st.session_state.groups[tower][group],
+    num_rows="dynamic",
+    use_container_width=True,
+    key=f"tech_editor_{tower}_{group}",
+)
 
-
-def normalize_name(text: str) -> str:
-    return (
-        text.lower()
-        .replace(" ", "")
-        .replace("_", "")
-        .replace("-", "")
-        .replace(".", "")
-    )
-
-
-def normalize_value(value: Any) -> str:
-    return str(value).strip().lower().replace(" ", "")
-
-
-def detect_target_column(file_name: str, vendors: List[str]) -> str:
-    name = normalize_name(file_name)
-
-    if "spec" in name or "consultant" in name or "specification" in name:
-        return "Consultant"
-
-    for vendor in vendors:
-        if normalize_name(vendor) in name:
-            return vendor
-
-    return ""
-
-
-def read_uploaded_file(uploaded_file) -> pd.DataFrame:
-    name = uploaded_file.name.lower()
-
-    if name.endswith(".csv"):
-        return pd.read_csv(uploaded_file).fillna("")
-
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(uploaded_file).fillna("")
-
-    if name.endswith(".pdf"):
-        if not PDF_READ_AVAILABLE:
-            return pd.DataFrame({"PDF Error": ["pdfplumber is not installed"]})
-
-        rows = []
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page_no, page in enumerate(pdf.pages, start=1):
-                tables = page.extract_tables()
-                for table in tables or []:
-                    for row in table:
-                        rows.append(row)
-
-                text = page.extract_text()
-                if text:
-                    for line in text.split("\n"):
-                        rows.append([f"Page {page_no}", line])
-
-        if not rows:
-            return pd.DataFrame({"PDF Content": ["No extractable text found"]})
-
-        max_cols = max(len(r) for r in rows)
-        rows = [r + [""] * (max_cols - len(r)) for r in rows]
-        return pd.DataFrame(rows, columns=[f"Column {i+1}" for i in range(max_cols)]).fillna("")
-
-    raise ValueError("Unsupported file format")
-
-
-def extract_combined_rows(raw_df: pd.DataFrame) -> List[str]:
-    raw_df = raw_df.fillna("").astype(str)
-    combined = raw_df.agg(" ".join, axis=1).tolist()
-    return [x.strip() for x in combined if x.strip()]
-
-
-def auto_fill_from_file(raw_df: pd.DataFrame, file_name: str):
-    target_col = detect_target_column(file_name, st.session_state.vendors)
-
-    if not target_col:
-        return False, "Could not detect target column. Rename file like Consultant Specification.pdf, KONE Offer.pdf, TKE Offer.pdf, EEE Offer.pdf, or AG MELCO Offer.pdf."
-
-    active_tower = st.session_state.active_tower
-    active_group = st.session_state.active_group
-
-    df = st.session_state.groups[active_tower][active_group].copy()
-    df = sync_vendor_columns(df, st.session_state.vendors).reset_index(drop=True)
-
-    extracted_rows = extract_combined_rows(raw_df)
-
-    if not extracted_rows:
-        return False, "No readable data found in uploaded file."
-
-    max_rows = min(len(df), len(extracted_rows))
-    df.loc[0:max_rows - 1, target_col] = extracted_rows[:max_rows]
-
-    st.session_state.groups[active_tower][active_group] = sync_vendor_columns(df, st.session_state.vendors)
-    st.session_state.editor_version += 1
-
-    return True, f"Auto-filled extracted data under {target_col}."
-
-
-def compliance_summary(df: pd.DataFrame, vendors: List[str]) -> pd.DataFrame:
-    rows = []
-    df = sync_vendor_columns(df, vendors)
-
-    for vendor in vendors:
-        total_checked = 0
-        match_count = 0
-        missing_count = 0
-        deviation_count = 0
-
-        for _, row in df.iterrows():
-            consultant = str(row.get("Consultant", "")).strip()
-            vendor_value = str(row.get(vendor, "")).strip()
-
-            if not consultant:
-                continue
-
-            total_checked += 1
-
-            if not vendor_value:
-                missing_count += 1
-            elif normalize_value(consultant) == normalize_value(vendor_value):
-                match_count += 1
-            else:
-                deviation_count += 1
-
-        score = round((match_count / total_checked) * 100, 1) if total_checked else 0
-
-        rows.append({
-            "Vendor": vendor,
-            "Checked Items": total_checked,
-            "Matched": match_count,
-            "Deviations": deviation_count,
-            "Missing": missing_count,
-            "Compliance %": score,
-        })
-
-    return pd.DataFrame(rows)
-
+# Compliance preview
+st.subheader("Deviation Preview")
 
 def highlight_mismatches(row):
     styles = [""] * len(row)
@@ -274,467 +186,59 @@ def highlight_mismatches(row):
             vendor_value = str(row.get(col, "")).strip()
 
             if not vendor_value:
-                styles[i] = "background-color: #fde68a"  # yellow missing
-            elif normalize_value(vendor_value) == normalize_value(consultant):
-                styles[i] = "background-color: #bbf7d0"  # green match
+                styles[i] = "background-color: #fde68a"
+            elif vendor_value.lower().replace(" ", "") == consultant.lower().replace(" ", ""):
+                styles[i] = "background-color: #bbf7d0"
             else:
-                styles[i] = "background-color: #fecaca"  # red deviation
+                styles[i] = "background-color: #fecaca"
 
     return styles
 
-
-def build_highlighted_excel(groups: Dict[str, Dict[str, pd.DataFrame]], vendors: List[str], project_info: Dict[str, Any]) -> bytes:
-    if not OPENPYXL_AVAILABLE:
-        return build_excel_or_csv(groups, vendors, project_info)
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Comparison"
-
-    thin = Side(style="thin", color="000000")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    title_fill = PatternFill("solid", fgColor="D9EAF7")
-    group_fill = PatternFill("solid", fgColor="BDD7EE")
-    header_fill = PatternFill("solid", fgColor="1F4E78")
-    spec_fill = PatternFill("solid", fgColor="E2F0D9")
-    match_fill = PatternFill("solid", fgColor="BBF7D0")
-    deviation_fill = PatternFill("solid", fgColor="FECACA")
-    missing_fill = PatternFill("solid", fgColor="FDE68A")
-
-    columns = ["Specification", "Consultant"] + vendors
-    last_col = len(columns)
-    row_no = 1
-
-    def apply_cell_style(cell, fill=None, bold=False, font_color="000000", align="center"):
-        cell.border = border
-        cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
-        cell.font = Font(bold=bold, color=font_color)
-        if fill:
-            cell.fill = fill
-
-    ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=last_col)
-    ws.cell(row_no, 1, project_info.get("document_title", "ELEVATOR TECHNICAL COMPARISON"))
-    apply_cell_style(ws.cell(row_no, 1), title_fill, True)
-    row_no += 1
-
-    ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=last_col)
-    ws.cell(row_no, 1, project_info.get("project", "RADIANT BRIDGES PROJECT"))
-    apply_cell_style(ws.cell(row_no, 1), title_fill, True)
-    row_no += 2
-
-    info_rows = [
-        ("Client", project_info.get("client", "")),
-        ("Main Contractor", project_info.get("main_contractor", "")),
-        ("Material / Work", project_info.get("material_work", "")),
-        ("Revision", project_info.get("revision", "")),
-        ("Date", project_info.get("comparison_date", "")),
-    ]
-
-    for label, value in info_rows:
-        ws.cell(row_no, 1, label)
-        ws.cell(row_no, 2, value)
-        apply_cell_style(ws.cell(row_no, 1), None, True, align="left")
-        apply_cell_style(ws.cell(row_no, 2), None, False, align="left")
-        row_no += 1
-
-    row_no += 1
-
-    for tower, group_data in groups.items():
-        for group, df in group_data.items():
-            df = sync_vendor_columns(df, vendors)
-
-            ws.merge_cells(start_row=row_no, start_column=1, end_row=row_no, end_column=last_col)
-            ws.cell(row_no, 1, f"{tower} - {group}")
-            apply_cell_style(ws.cell(row_no, 1), group_fill, True)
-            row_no += 1
-
-            for col_idx, col_name in enumerate(columns, start=1):
-                cell = ws.cell(row_no, col_idx, col_name)
-                apply_cell_style(cell, header_fill, True, "FFFFFF")
-            row_no += 1
-
-            for _, data_row in df.iterrows():
-                consultant = str(data_row.get("Consultant", "")).strip()
-
-                for col_idx, col_name in enumerate(columns, start=1):
-                    value = str(data_row.get(col_name, ""))
-                    cell = ws.cell(row_no, col_idx, value)
-                    fill = None
-                    bold = False
-
-                    if col_name == "Specification":
-                        fill = spec_fill
-                        bold = True
-                    elif col_name in vendors and consultant:
-                        vendor_value = str(data_row.get(col_name, "")).strip()
-                        if not vendor_value:
-                            fill = missing_fill
-                        elif normalize_value(vendor_value) == normalize_value(consultant):
-                            fill = match_fill
-                        else:
-                            fill = deviation_fill
-
-                    apply_cell_style(cell, fill, bold, align="left")
-
-                row_no += 1
-
-            row_no += 2
-
-    for col_idx in range(1, last_col + 1):
-        ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else "Z"].width = 26
-    ws.column_dimensions["A"].width = 34
-
-    output = io.BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output.getvalue()
-
-
-def build_excel_or_csv(groups, vendors, project_info):
-    rows = []
-    rows.append([project_info.get("document_title", "")])
-    rows.append([project_info.get("project", "")])
-    rows.append(["Client", project_info.get("client", "")])
-    rows.append(["Main Contractor", project_info.get("main_contractor", "")])
-    rows.append(["Material / Work", project_info.get("material_work", "")])
-    rows.append(["Revision", project_info.get("revision", "")])
-    rows.append(["Date", project_info.get("comparison_date", "")])
-    rows.append([])
-
-    columns = ["Specification", "Consultant"] + vendors
-
-    for tower, group_data in groups.items():
-        for group, df in group_data.items():
-            df = sync_vendor_columns(df, vendors)
-            rows.append([f"{tower} - {group}"])
-            rows.append(columns)
-            for _, r in df.iterrows():
-                rows.append([r.get(c, "") for c in columns])
-            rows.append([])
-
-    output = io.StringIO()
-    pd.DataFrame(rows).to_csv(output, index=False, header=False)
-    return output.getvalue().encode("utf-8-sig")
-
-
-def make_pdf_from_lines(lines: List[str]) -> bytes:
-    def esc(text):
-        text = str(text).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        return text[:120]
-
-    pages = [lines[i:i + 42] for i in range(0, len(lines), 42)]
-    objects = []
-    objects.append("<< /Type /Catalog /Pages 2 0 R >>")
-    objects.append(f"<< /Type /Pages /Kids [{' '.join(f'{3 + i * 2} 0 R' for i in range(len(pages)))}] /Count {len(pages)} >>")
-
-    for page_index, page_lines in enumerate(pages):
-        page_obj = 3 + page_index * 2
-        content_obj = page_obj + 1
-        objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] "
-            f"/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> "
-            f"/Contents {content_obj} 0 R >>"
-        )
-        y = 560
-        content = ["BT /F1 9 Tf"]
-        for line in page_lines:
-            content.append(f"40 {y} Td ({esc(line)}) Tj")
-            content.append("0 -12 Td")
-            y -= 12
-        content.append("ET")
-        stream = "\n".join(content)
-        objects.append(f"<< /Length {len(stream.encode('latin-1', 'ignore'))} >>\nstream\n{stream}\nendstream")
-
-    pdf = "%PDF-1.4\n"
-    offsets = [0]
-    for i, obj in enumerate(objects, start=1):
-        offsets.append(len(pdf.encode("latin-1")))
-        pdf += f"{i} 0 obj\n{obj}\nendobj\n"
-    xref_pos = len(pdf.encode("latin-1"))
-    pdf += f"xref\n0 {len(objects) + 1}\n"
-    pdf += "0000000000 65535 f \n"
-    for offset in offsets[1:]:
-        pdf += f"{offset:010d} 00000 n \n"
-    pdf += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF"
-    return pdf.encode("latin-1", "ignore")
-
-
-def build_simple_pdf(groups, vendors, project_info) -> bytes:
-    lines = []
-    lines.append(project_info.get("document_title", "ELEVATOR TECHNICAL COMPARISON"))
-    lines.append(project_info.get("project", "RADIANT BRIDGES PROJECT"))
-    lines.append("")
-    lines.append(f"Client: {project_info.get('client', '')}")
-    lines.append(f"Main Contractor: {project_info.get('main_contractor', '')}")
-    lines.append(f"Material / Work: {project_info.get('material_work', '')}")
-    lines.append(f"Revision: {project_info.get('revision', '')}")
-    lines.append(f"Date: {project_info.get('comparison_date', '')}")
-    lines.append("")
-
-    for tower, group_data in groups.items():
-        for group, df in group_data.items():
-            df = sync_vendor_columns(df, vendors)
-            lines.append("=" * 90)
-            lines.append(f"CONSULTANT SPECIFICATION - {tower} - {group}")
-            lines.append("=" * 90)
-            for _, r in df.iterrows():
-                lines.append(f"{r.get('Specification', '')}: {r.get('Consultant', '')}")
-            lines.append("")
-            for vendor in vendors:
-                lines.append("-" * 90)
-                lines.append(f"VENDOR OFFER - {vendor} - {tower} - {group}")
-                lines.append("-" * 90)
-                for _, r in df.iterrows():
-                    lines.append(f"{r.get('Specification', '')}: {r.get(vendor, '')}")
-                lines.append("")
-    return make_pdf_from_lines(lines)
-
-
-def export_backup():
-    data = {
-        "vendors": st.session_state.vendors,
-        "project_info": st.session_state.project_info,
-        "groups": {
-            tower: {group: df.to_dict(orient="records") for group, df in group_data.items()}
-            for tower, group_data in st.session_state.groups.items()
-        },
-    }
-    return json.dumps(data, indent=2).encode("utf-8")
-
-
-init_state()
-sync_all_groups()
-ensure_active_selection()
-
-with st.sidebar:
-    st.header("⚙️ Project Info")
-    pi = st.session_state.project_info
-    pi["project"] = st.text_input("Project", pi.get("project", ""))
-    pi["document_title"] = st.text_input("Document Title", pi.get("document_title", ""))
-    pi["client"] = st.text_input("Client", pi.get("client", ""))
-    pi["main_contractor"] = st.text_input("Main Contractor", pi.get("main_contractor", ""))
-    pi["material_work"] = st.text_input("Material / Work", pi.get("material_work", ""))
-    pi["pr_no"] = st.text_input("PR No.", pi.get("pr_no", ""))
-    pi["revision"] = st.text_input("Revision", pi.get("revision", ""))
-    pi["comparison_date"] = st.text_input("Date", pi.get("comparison_date", ""))
-
-    st.divider()
-    st.header("🏢 Structure")
-    if st.session_state.groups:
-        tower_list = list(st.session_state.groups.keys())
-        st.session_state.active_tower = st.selectbox("Tower / Section", tower_list)
-        group_list = list(st.session_state.groups[st.session_state.active_tower].keys())
-        if group_list:
-            st.session_state.active_group = st.selectbox("Group", group_list)
-        else:
-            st.session_state.active_group = ""
-
-    new_tower = st.text_input("Add Tower / Section")
-    if st.button("Add Tower / Section"):
-        name = new_tower.strip()
-        if name and name not in st.session_state.groups:
-            st.session_state.groups[name] = {}
-            st.session_state.active_tower = name
-            st.rerun()
-
-    new_group = st.text_input("Add Group")
-    if st.button("Add Group"):
-        name = new_group.strip()
-        if st.session_state.active_tower and name:
-            st.session_state.groups[st.session_state.active_tower][name] = make_default_df(st.session_state.vendors)
-            st.session_state.active_group = name
-            st.session_state.editor_version += 1
-            st.rerun()
-
-    c1, c2 = st.columns(2)
-    if c1.button("Remove Group"):
-        if st.session_state.active_tower and st.session_state.active_group:
-            del st.session_state.groups[st.session_state.active_tower][st.session_state.active_group]
-            ensure_active_selection()
-            st.session_state.editor_version += 1
-            st.rerun()
-
-    if c2.button("Remove Tower"):
-        if st.session_state.active_tower:
-            del st.session_state.groups[st.session_state.active_tower]
-            ensure_active_selection()
-            st.session_state.editor_version += 1
-            st.rerun()
-
-    st.divider()
-    st.header("🏷️ Vendors")
-    new_vendor = st.text_input("Add Vendor")
-    if st.button("Add Vendor"):
-        name = new_vendor.strip().upper()
-        if name and name not in st.session_state.vendors:
-            st.session_state.vendors.append(name)
-            sync_all_groups()
-            st.session_state.editor_version += 1
-            st.rerun()
-
-    for vendor in list(st.session_state.vendors):
-        a, b = st.columns([4, 1])
-        a.write(vendor)
-        if b.button("❌", key=f"del_{vendor}"):
-            st.session_state.vendors.remove(vendor)
-            sync_all_groups()
-            st.session_state.editor_version += 1
-            st.rerun()
-
-st.title("🛗 Radiant Bridges Dynamic Comparison App")
-st.caption("Auto-fill consultant/vendor columns, highlight deviations, and export highlighted Excel report.")
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Towers", len(st.session_state.groups))
-m2.metric("Groups", sum(len(x) for x in st.session_state.groups.values()))
-m3.metric("Vendors", len(st.session_state.vendors))
-m4.metric("Active", f"{st.session_state.active_tower or '-'} / {st.session_state.active_group or '-'}")
-
-st.divider()
-
-if not st.session_state.groups:
-    st.warning("No tower/section available. Add one from sidebar.")
-    st.stop()
-
-if not st.session_state.active_tower or not st.session_state.groups.get(st.session_state.active_tower):
-    st.warning("Please add at least one group under selected tower/section.")
-    st.stop()
-
-active_tower = st.session_state.active_tower
-active_group = st.session_state.active_group
-
-st.subheader(f"📊 {active_tower} > {active_group}")
-
-current_df = sync_vendor_columns(st.session_state.groups[active_tower][active_group], st.session_state.vendors)
-
-edited_df = st.data_editor(
-    current_df,
-    num_rows="dynamic",
+st.dataframe(
+    st.session_state.groups[tower][group].style.apply(highlight_mismatches, axis=1),
     use_container_width=True,
-    hide_index=True,
-    key=f"editor_{active_tower}_{active_group}_{st.session_state.editor_version}",
 )
 
-st.session_state.groups[active_tower][active_group] = sync_vendor_columns(edited_df, st.session_state.vendors)
+# Commercial data input
+with st.sidebar.expander("Commercial & Pricing Data", expanded=True):
+    st.write("Pricing Summary")
+    st.session_state.commercial_data["pricing"] = st.data_editor(
+        st.session_state.commercial_data["pricing"],
+        num_rows="dynamic",
+        use_container_width=True,
+        key="pricing_editor",
+    )
 
-st.subheader("🔍 Compliance Check / Deviation Highlight")
-summary_df = compliance_summary(st.session_state.groups[active_tower][active_group], st.session_state.vendors)
-st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.write("Payment Terms")
+    st.session_state.commercial_data["payment"] = st.data_editor(
+        st.session_state.commercial_data["payment"],
+        num_rows="dynamic",
+        use_container_width=True,
+        key="payment_editor",
+    )
 
-styled_df = st.session_state.groups[active_tower][active_group].style.apply(highlight_mismatches, axis=1)
-st.dataframe(styled_df, use_container_width=True)
+    st.write("Delivery Program")
+    st.session_state.commercial_data["delivery"] = st.data_editor(
+        st.session_state.commercial_data["delivery"],
+        num_rows="dynamic",
+        use_container_width=True,
+        key="delivery_editor",
+    )
 
-st.divider()
-st.subheader("📎 Upload Specification / Vendor Offer")
+# Export
+st.subheader("Export")
 
-attachment_uploads = st.file_uploader(
-    "Upload Consultant Specification or Vendor Offer",
-    type=["pdf", "xlsx", "xls", "csv"],
-    accept_multiple_files=True,
-    key="main_attachment_upload",
+data = build_highlighted_excel(
+    st.session_state.groups,
+    st.session_state.commercial_data,
+    st.session_state.vendors,
 )
-
-if attachment_uploads:
-    existing = {x["name"] for x in st.session_state.attachments}
-    for file in attachment_uploads:
-        if file.name not in existing:
-            st.session_state.attachments.append({
-                "name": file.name,
-                "type": file.type,
-                "size": file.size,
-                "bytes": file.getvalue(),
-            })
-
-if st.session_state.attachments:
-    st.write("Uploaded files:")
-    for i, item in enumerate(list(st.session_state.attachments)):
-        target = detect_target_column(item["name"], st.session_state.vendors)
-        target_label = target if target else "Not detected"
-        a, b, c, d = st.columns([5, 2, 2, 1])
-        a.write(f"📄 {item['name']}")
-        b.write(f"{round(item['size'] / 1024, 1)} KB")
-        c.write(f"Target: **{target_label}**")
-        if d.button("Remove", key=f"remove_{i}"):
-            st.session_state.attachments.pop(i)
-            st.rerun()
-
-    st.divider()
-    st.subheader("⚡ Auto Fill Data")
-    selected_name = st.selectbox("Select file to auto-fill", [x["name"] for x in st.session_state.attachments])
-    selected = next(x for x in st.session_state.attachments if x["name"] == selected_name)
-
-    file_obj = io.BytesIO(selected["bytes"])
-    file_obj.name = selected["name"]
-
-    try:
-        raw_df = read_uploaded_file(file_obj).reset_index(drop=True).fillna("")
-        detected_target = detect_target_column(selected_name, st.session_state.vendors)
-
-        if detected_target:
-            st.success(f"Detected target column: {detected_target}")
-        else:
-            st.warning("Could not detect target column from file name.")
-
-        with st.expander("Preview extracted data"):
-            st.dataframe(raw_df.head(30), use_container_width=True, hide_index=True)
-
-        if st.button("Auto Fill to Detected Column", type="primary"):
-            ok, msg = auto_fill_from_file(raw_df, selected_name)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.warning(msg)
-
-        st.caption("File name examples: Consultant Specification.pdf, KONE Offer.pdf, TKE Offer.xlsx, EEE Offer.pdf, AG MELCO Offer.pdf")
-
-    except Exception as exc:
-        st.error(f"Unable to read selected file: {exc}")
-else:
-    st.info("Upload Consultant Specification or Vendor Offer files above.")
-
-st.divider()
-st.subheader("📤 Export")
-
-try:
-    highlighted_excel = build_highlighted_excel(st.session_state.groups, st.session_state.vendors, st.session_state.project_info)
-    st.download_button(
-        "📥 Download Highlighted Excel Report",
-        data=highlighted_excel,
-        file_name="RADIANT_BRIDGES_HIGHLIGHTED_COMPARISON.xlsx" if OPENPYXL_AVAILABLE else "RADIANT_BRIDGES_COMPARISON.csv",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" if OPENPYXL_AVAILABLE else "text/csv",
-        use_container_width=True,
-        type="primary",
-    )
-except Exception as exc:
-    st.warning(f"Highlighted Excel export unavailable: {exc}")
-
-try:
-    pdf_bytes = build_simple_pdf(st.session_state.groups, st.session_state.vendors, st.session_state.project_info)
-    st.download_button(
-        "📄 Download PDF",
-        data=pdf_bytes,
-        file_name="RADIANT_BRIDGES_COMPARISON.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
-except Exception as exc:
-    st.warning(f"PDF export unavailable: {exc}")
 
 st.download_button(
-    "💾 Backup JSON",
-    data=export_backup(),
-    file_name="radiant_bridges_backup.json",
-    mime="application/json",
+    "📥 Download Full Highlighted Excel Report",
+    data=data,
+    file_name="Radiant_Bridges_Report.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     use_container_width=True,
+    type="primary",
 )
-
-with st.expander("Requirements"):
-    st.code(
-        """streamlit
-pandas
-pdfplumber
-openpyxl""",
-        language="text",
-    )
