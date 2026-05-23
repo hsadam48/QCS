@@ -7,6 +7,7 @@ import streamlit as st
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    from openpyxl.utils import get_column_letter
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
@@ -136,7 +137,6 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
     ws = wb.active
     ws.title = "Comparison Report"
 
-    # Styles
     header_fill = PatternFill("solid", fgColor="1F4E78")
     group_fill = PatternFill("solid", fgColor="BDD7EE")
     spec_fill = PatternFill("solid", fgColor="E2F0D9")
@@ -169,6 +169,7 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
                 end_row=row_no,
                 end_column=len(df.columns),
             )
+
             title_cell = ws.cell(row_no, 1, f"{tower} - {group_name}")
             apply_style(title_cell, group_fill, True)
             row_no += 1
@@ -180,6 +181,7 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
                     True,
                     "FFFFFF",
                 )
+
             row_no += 1
 
             for _, row in df.iterrows():
@@ -226,6 +228,7 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
             end_row=row,
             end_column=max(1, len(df.columns)),
         )
+
         title_cell = ws.cell(row, 1, title)
         apply_style(title_cell, group_fill, True)
         row += 1
@@ -237,6 +240,7 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
                 True,
                 "FFFFFF",
             )
+
         row += 1
 
         for _, r in df.iterrows():
@@ -250,9 +254,11 @@ def build_highlighted_excel(groups, commercial_data, vendors) -> bytes:
     row_no = write_section(ws, row_no, "PAYMENT TERMS", commercial_data["payment"])
     row_no = write_section(ws, row_no, "DELIVERY PROGRAM", commercial_data["delivery"])
 
-    # Column widths
-    for col in ws.columns:
-        col_letter = col[0].column_letter
+    # Safe column widths
+    max_col = ws.max_column
+
+    for col_idx in range(1, max_col + 1):
+        col_letter = get_column_letter(col_idx)
         ws.column_dimensions[col_letter].width = 24
 
     ws.column_dimensions["A"].width = 32
