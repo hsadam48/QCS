@@ -563,11 +563,7 @@ else:
 st.divider()
 st.subheader("📤 Export")
 
-excel_bytes = build_excel(
-    st.session_state.groups,
-    st.session_state.vendors,
-    st.session_state.project_info,
-)
+st.info("Excel export temporarily disabled during deployment test.")
 
 pdf_bytes = build_simple_pdf(
     st.session_state.groups,
