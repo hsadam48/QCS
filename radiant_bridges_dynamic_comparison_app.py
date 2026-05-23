@@ -24,9 +24,15 @@ st.set_page_config(page_title="Radiant Bridges Pro Hub", page_icon="🛗", layou
 DEFAULT_VENDORS = ["KONE", "TKE", "EEE", "AG MELCO"]
 
 SPEC_LIST = [
-    "CAPACITY", "SPEED", "DOOR TYPE", "DOOR SIZE (W X H)",
-    "SHAFT SIZE (W X D)", "CABIN SIZE (W X D X H)",
-    "OVER HEAD HEIGHT", "PIT DEPTH", "NO. OF LIFTS",
+    "CAPACITY",
+    "SPEED",
+    "DOOR TYPE",
+    "DOOR SIZE (W X H)",
+    "SHAFT SIZE (W X D)",
+    "CABIN SIZE (W X D X H)",
+    "OVER HEAD HEIGHT",
+    "PIT DEPTH",
+    "NO. OF LIFTS",
 ]
 
 
@@ -68,7 +74,16 @@ init_state()
 
 
 def normalize(value):
-    return str(value).strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    return (
+        str(value)
+        .strip()
+        .lower()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("_", "")
+        .replace("/", "")
+        .replace(":", "")
+    )
 
 
 def detect_target_column(file_name: str, vendors: List[str]):
@@ -168,22 +183,53 @@ def read_file_as_rows(uploaded_file) -> List[str]:
     return []
 
 
-def auto_fill_column_from_rows(rows: List[str], target_col: str, tower: str, group: str):
+def extract_value_by_spec(full_text: str, spec: str) -> str:
+    lines = full_text.splitlines()
+    spec_key = normalize(spec)
+
+    for line in lines:
+        clean_line = normalize(line)
+
+        if spec_key and spec_key in clean_line:
+            for sep in [":", "-", "–", "|"]:
+                if sep in line:
+                    parts = line.split(sep, 1)
+                    if len(parts) == 2 and parts[1].strip():
+                        return parts[1].strip()
+
+            return line.strip()
+
+    return ""
+
+
+def auto_fill_column_exact(rows: List[str], target_col: str, tower: str, group: str):
     df = st.session_state.groups[tower][group].copy()
 
     if target_col not in df.columns:
         df[target_col] = ""
 
-    max_rows = min(len(df), len(rows))
+    full_text = "\n".join(rows)
+    filled_count = 0
 
-    if max_rows == 0:
-        return False, "No extractable data found."
+    for idx, row in df.iterrows():
+        spec = str(row.get("Specification", "")).strip()
 
-    df.loc[:max_rows - 1, target_col] = rows[:max_rows]
+        if not spec:
+            continue
+
+        value = extract_value_by_spec(full_text, spec)
+
+        if value:
+            df.at[idx, target_col] = value
+            filled_count += 1
+
     st.session_state.groups[tower][group] = df
     st.session_state.editor_version += 1
 
-    return True, f"Auto-filled {max_rows} rows under {target_col}."
+    if filled_count == 0:
+        return False, f"No matching specification values found for {target_col}."
+
+    return True, f"Filled {filled_count} matching specification values under {target_col}."
 
 
 def build_excel(groups, commercial_data, vendors) -> bytes:
@@ -339,6 +385,23 @@ with st.sidebar:
             st.session_state.editor_version += 1
             st.rerun()
 
+    rename_tower = st.text_input("Rename selected tower", selected_tower)
+
+    if st.button("Rename Tower"):
+        new_name = rename_tower.strip()
+        if new_name and new_name != selected_tower:
+            st.session_state.groups[new_name] = st.session_state.groups.pop(selected_tower)
+            st.session_state.editor_version += 1
+            st.rerun()
+
+    if st.button("Remove Selected Tower"):
+        if len(st.session_state.groups) > 1:
+            del st.session_state.groups[selected_tower]
+            st.session_state.editor_version += 1
+            st.rerun()
+        else:
+            st.warning("At least one tower is required.")
+
     group_names = list(st.session_state.groups[selected_tower].keys())
     selected_group = st.selectbox("Select Group", group_names)
 
@@ -349,6 +412,23 @@ with st.sidebar:
             st.session_state.groups[selected_tower][new_group_name.strip()] = make_default_df(st.session_state.vendors)
             st.session_state.editor_version += 1
             st.rerun()
+
+    rename_group = st.text_input("Rename selected group", selected_group)
+
+    if st.button("Rename Group"):
+        new_name = rename_group.strip()
+        if new_name and new_name != selected_group:
+            st.session_state.groups[selected_tower][new_name] = st.session_state.groups[selected_tower].pop(selected_group)
+            st.session_state.editor_version += 1
+            st.rerun()
+
+    if st.button("Remove Selected Group"):
+        if len(st.session_state.groups[selected_tower]) > 1:
+            del st.session_state.groups[selected_tower][selected_group]
+            st.session_state.editor_version += 1
+            st.rerun()
+        else:
+            st.warning("At least one group is required.")
 
 
 st.subheader(f"Technical Comparison - {selected_tower} / {selected_group}")
@@ -377,7 +457,7 @@ st.divider()
 st.subheader("Upload Specification / Vendor Offer PDFs")
 
 uploaded_files = st.file_uploader(
-    "Upload PDF/Excel/CSV files. File name should match vendor name.",
+    "Upload PDF/Excel/CSV files. File name should match vendor name or consultant/spec.",
     type=["pdf", "xlsx", "xls", "csv"],
     accept_multiple_files=True,
 )
@@ -392,7 +472,7 @@ if uploaded_files:
 
         rows = read_file_as_rows(f)
 
-        ok, msg = auto_fill_column_from_rows(
+        ok, msg = auto_fill_column_exact(
             rows=rows,
             target_col=target_col,
             tower=selected_tower,
